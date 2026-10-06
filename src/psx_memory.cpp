@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <fstream>
 namespace psxrecomp {
 
 namespace {
@@ -10,6 +11,7 @@ const uint32_t kRamMirrorMask = 0x001FFFFFu;
 const uint32_t kScratchpadBase = 0x1F800000u;
 const uint32_t kIoBase = 0x1F801000u;
 const uint32_t kIoEnd = 0x1F802000u;
+const uint32_t kBiosBase = 0x1FC00000u;
 const uint32_t kIStat = 0x1F801070u;
 const uint32_t kIMask = 0x1F801074u;
 const uint32_t kDmaBase = 0x1F801080u;
@@ -69,6 +71,7 @@ uint8_t PsxMemory::rawRead8(uint32_t addr) const
 {
     const uint32_t p=physical(addr);
     if(p<0x00800000u) return m_ram[p&kRamMirrorMask];
+    if(m_biosLoaded && p>=kBiosBase && p<kBiosBase+BiosRomSize) return m_biosRom[p-kBiosBase];
     if(isScratchpad(p)) return m_scratchpad[p-kScratchpadBase];
     if(p>=kIoBase&&p<kIoEnd) return m_io[p-kIoBase];
     return 0;
@@ -298,5 +301,25 @@ void PsxMemory::write32(uint32_t addr,uint32_t value)
 }
 
 void PsxMemory::loadBytes(uint32_t guestAddress,const uint8_t* data,std::size_t size){for(std::size_t i=0;i<size;++i)rawWrite8(guestAddress+uint32_t(i),data[i]);}
+
+bool PsxMemory::loadBiosRom(const std::string& path)
+{
+    std::ifstream f(path.c_str(),std::ios::binary);
+    if(!f) return false;
+    f.read(reinterpret_cast<char*>(m_biosRom.data()),BiosRomSize);
+    if(f.gcount()!=static_cast<std::streamsize>(BiosRomSize)) return false;
+    char extra=0;
+    if(f.read(&extra,1)) return false;
+    m_biosLoaded=true;
+    tracePrintf("[BIOS ROM] loaded %s size=%u base=%08X\n",
+                path.c_str(),(unsigned)BiosRomSize,(unsigned)kBiosBase);
+    return true;
+}
+
+void PsxMemory::clearBiosRom()
+{
+    m_biosRom.fill(0);
+    m_biosLoaded=false;
+}
 
 } // namespace psxrecomp
