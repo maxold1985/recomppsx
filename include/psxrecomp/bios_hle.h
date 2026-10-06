@@ -69,6 +69,10 @@ private:
     bool m_cdBiosIrqInstalled=false;
     uint8_t m_cdLastStatus=0;
     uint8_t m_cdLastError=0;
+    bool m_cdAsyncReadActive=false;
+    uint32_t m_cdAsyncReadRemaining=0;
+    uint32_t m_cdAsyncReadDst=0;
+    uint16_t m_cdAsyncReadMode=0;
 
     // Callback BIOS mode 0x1000 runs guest code and returns through an HLE
     // trampoline.  The interrupted CPU context is restored at the trampoline.
