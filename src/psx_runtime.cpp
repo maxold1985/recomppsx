@@ -784,8 +784,15 @@ bool PsxRuntime::handleHle()
         (isOpenBiosPc(m_cpu.pc) ||
          (m_openBiosCallActive && isOpenBiosKernelRamPc(m_cpu.pc)));
 
-    if(stepOpenBios())
+    const bool nativeCallWasActive=m_openBiosCallActive;
+    const uint32_t nativeCallVector=m_openBiosVectorPc;
+    const r3k::CpuState nativeCallInput=m_openBiosFallbackCpu;
+
+    if(stepOpenBios()){
+        if(nativeCallWasActive && !m_openBiosCallActive && nativeCallVector!=0u)
+            m_bios.observeNativeVectorCall(nativeCallVector,nativeCallInput,m_cpu);
         return true;
+    }
 
     if(openPath && m_openBiosCallActive){
         const uint32_t failedPc=m_cpu.pc;
