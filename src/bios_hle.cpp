@@ -422,7 +422,7 @@ int BiosHle::threadIndex(uint32_t handle) const
 
 uint32_t BiosHle::openThread(r3k::CpuState& cpu,uint32_t pc,uint32_t sp,uint32_t gp)
 {
-    for(unsigned i=1;i<m_threads.size();++i){
+    for(unsigned i=0;i<m_threads.size();++i){
         if(m_threads[i].used) continue;
         Thread t;
         t.used=true;
@@ -444,9 +444,14 @@ uint32_t BiosHle::openThread(r3k::CpuState& cpu,uint32_t pc,uint32_t sp,uint32_t
 uint32_t BiosHle::closeThread(uint32_t handle)
 {
     const int idx=threadIndex(handle);
-    if(idx>0 && static_cast<unsigned>(idx)!=m_currentThread)
-        m_threads[static_cast<unsigned>(idx)]=Thread();
-    tracePrintf("[BIOS THREAD CLOSE] handle=%08X idx=%d\n",(unsigned)handle,idx);
+    if(idx>=0){
+        Thread& t=m_threads[static_cast<unsigned>(idx)];
+        t.used=false;
+        if(static_cast<unsigned>(idx)!=m_currentThread)
+            t.cpu=r3k::CpuState();
+    }
+    tracePrintf("[BIOS THREAD CLOSE] handle=%08X idx=%d current=%u\n",
+                (unsigned)handle,idx,m_currentThread);
     return 1;
 }
 
@@ -459,10 +464,11 @@ uint32_t BiosHle::changeThread(r3k::CpuState& cpu,uint32_t handle)
 
     const uint64_t cycles=cpu.cycles;
     Thread& old=m_threads[m_currentThread];
-    old.used=true;
-    old.cpu=cpu;
-    old.cpu.pc=cpu.gpr[31];
-    old.cpu.gpr[2]=1;
+    if(old.used){
+        old.cpu=cpu;
+        old.cpu.pc=cpu.gpr[31];
+        old.cpu.gpr[2]=1;
+    }
 
     cpu=m_threads[static_cast<unsigned>(idx)].cpu;
     cpu.cycles=cycles;
