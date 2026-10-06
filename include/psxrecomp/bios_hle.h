@@ -76,6 +76,7 @@ private:
     uint32_t m_irqChainNext=0;
     uint32_t m_irqChainSecond=0;
     uint32_t m_irqChainFunc=0;
+    uint16_t m_irqChainPending=0;
     bool m_irqChainInSecond=false;
     static const uint32_t kEventCallbackTrampoline = 0x800000D0u;
 };
