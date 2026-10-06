@@ -271,8 +271,9 @@ bool file_exists(const char* path)
 
 void print_usage()
 {
-    log_error("usage: psx_recomp_gl <PS-X EXE> [disc.bin|disc.iso|CDROOT]\n");
-    log_error("example: psx_recomp_gl SLPS_027.11 CDROOT\n");
+    log_error("usage: psx_recomp_gl <PS-X EXE> [disc.bin|disc.iso|CDROOT] [--openbios openbios.bin]\n");
+    log_error("example: psx_recomp_gl SLPS_027.11 CD.iso --openbios openbios.bin\n");
+    log_error("without --openbios the existing recomppsx HLE BIOS is used unchanged\n");
 }
 
 } // namespace
@@ -315,6 +316,22 @@ int main(int argc, char** argv)
         log_line("[BOOT] constructing PSX runtime on heap...\n");
         std::unique_ptr<psxrecomp::PsxRuntime> runtime(new psxrecomp::PsxRuntime());
 
+        const char* openBiosPath=0;
+        for(int i=2;i+1<argc;++i){
+            if(std::string(argv[i])=="--openbios"){
+                openBiosPath=argv[i+1];
+                break;
+            }
+        }
+        if(openBiosPath){
+            if(runtime->enableOpenBios(openBiosPath))
+                log_line("[BOOT] OpenBIOS compatibility enabled: %s\n",openBiosPath);
+            else
+                log_error("[WARN] OpenBIOS unavailable/invalid; using existing HLE BIOS: %s\n",openBiosPath);
+        } else {
+            runtime->useHleBios();
+        }
+
         log_line("[BOOT] loading executable into guest RAM...\n");
         runtime->loadExecutable(image);
         g_guestPc = runtime->cpu().pc;
@@ -322,10 +339,11 @@ int main(int argc, char** argv)
         log_line("[BOOT] guest PC=0x%08X SP=0x%08X\n",
                  runtime->cpu().pc, runtime->cpu().gpr[29]);
 
-        if (argc >= 3) {
-            log_line("[BOOT] mounting disc/CDROOT: %s\n", argv[2]);
-            if (!runtime->mountDisc(argv[2])) {
-                log_error("[WARN] could not mount disc/CDROOT: %s\n", argv[2]);
+        const char* discPath=(argc>=3 && std::string(argv[2])!="--openbios") ? argv[2] : 0;
+        if (discPath) {
+            log_line("[BOOT] mounting disc/CDROOT: %s\n", discPath);
+            if (!runtime->mountDisc(discPath)) {
+                log_error("[WARN] could not mount disc/CDROOT: %s\n", discPath);
             } else {
                 log_line("[BOOT] disc/CDROOT mounted\n");
             }
@@ -398,7 +416,8 @@ int main(int argc, char** argv)
             if(g_restartGuest && g_emulationState==EmulationRunning){
                 log_line("[CONTROL] Start after Stop: restarting guest\n");
                 runtime->loadExecutable(image);
-                if(argc>=3) runtime->mountDisc(argv[2]);
+                if(openBiosPath) runtime->enableOpenBios(openBiosPath);
+                if(discPath) runtime->mountDisc(discPath);
                 g_guestPc=runtime->cpu().pc;
                 g_guestCycles=runtime->cpu().cycles;
                 warnedStall=false;
