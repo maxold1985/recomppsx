@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace psxrecomp {
 
@@ -20,6 +21,7 @@ class PsxMemory final : public r3k::Memory {
 public:
     static const std::size_t MainRamSize = 2 * 1024 * 1024;
     static const std::size_t ScratchpadSize = 1024;
+    static const std::size_t BiosRomSize = 512 * 1024;
 
     PsxMemory(psxgpu::PsxGpu& gpu, IrqController& irq, PsxTimers& timers,
               PsxCdrom& cdrom, PsxMdec& mdec, PsxSpu& spu, PsxPadSio& sio);
@@ -41,6 +43,9 @@ public:
 
     void clear();
     void loadBytes(uint32_t guestAddress, const uint8_t* data, std::size_t size);
+    bool loadBiosRom(const std::string& path);
+    void clearBiosRom();
+    bool hasBiosRom() const { return m_biosLoaded; }
 
     psxgpu::PsxGpuMmio& gpuMmio() { return m_gpuMmio; }
     const std::array<uint8_t, MainRamSize>& ram() const { return m_ram; }
@@ -75,6 +80,8 @@ private:
 
     std::array<uint8_t, MainRamSize> m_ram;
     std::array<uint8_t, ScratchpadSize> m_scratchpad;
+    std::array<uint8_t, BiosRomSize> m_biosRom;
+    bool m_biosLoaded = false;
     std::array<uint8_t, 0x1000> m_io;
     std::array<DmaChannel,7> m_dma;
     uint32_t m_dicr = 0;
