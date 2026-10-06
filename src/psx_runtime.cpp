@@ -24,6 +24,18 @@ static bool isOpenBiosPc(uint32_t pc)
     return p>=kBiosPhysBase && p<kBiosPhysEnd;
 }
 
+static bool isOpenBiosKernelRamPc(uint32_t pc)
+{
+    const uint32_t p=pc&0x1FFFFFFFu;
+    return p<0x0000E000u;
+}
+
+static bool isBiosCallVector(uint32_t pc)
+{
+    const uint32_t p=pc&0x1FFFFFFFu;
+    return p==0x000000A0u || p==0x000000B0u || p==0x000000C0u;
+}
+
 static uint32_t biosLwl(PsxMemory& mem,uint32_t a,uint32_t rt)
 {
     const uint32_t w=mem.read32(a&~3u);
@@ -208,6 +220,10 @@ void PsxRuntime::reset()
     m_pad.reset();
     m_gte.reset();
     m_bios.reset();
+    m_openBiosKernelReady=false;
+    m_openBiosBootstrapActive=false;
+    m_openBiosCallActive=false;
+    m_openBiosVectorPc=0;
     m_scanlineCycles=0;
     m_dotClockNumerator=0;
     m_scanline=0;
@@ -224,8 +240,13 @@ void PsxRuntime::loadExecutable(const PsxExeImage& image)
     tracePrintf("[RUNTIME] loadExecutable entry=%08X load=%08X size=%u\n", image.initial_pc, image.load_address, (unsigned)image.payload.size());
     reset();
 
-    // A PS-X EXE normally starts after the retail BIOS has already initialized
-    // the CD-ROM subsystem. Direct EXE loading skips that boot sequence.
+    // Direct PS-X EXE loading skips the BIOS boot. With OpenBIOS selected,
+    // execute only its early boot until the low-RAM A0/B0/C0 vectors and A0
+    // table are installed. The existing recomppsx HLE remains initialized as
+    // a fallback for calls the OpenBIOS interpreter cannot complete yet.
+    if(m_biosBackend==BiosBackendOpenBios && m_memory.hasBiosRom())
+        bootstrapOpenBiosKernel();
+
     m_bios.initializeCdrom();
     if (!image.payload.empty())
         m_memory.loadBytes(image.load_address, image.payload.data(), image.payload.size());
@@ -254,6 +275,9 @@ bool PsxRuntime::enableOpenBios(const std::string& path)
         return false;
     }
     m_biosBackend=BiosBackendOpenBios;
+    m_openBiosKernelReady=false;
+    m_openBiosCallActive=false;
+    m_openBiosVectorPc=0;
     tracePrintf("[RUNTIME] BIOS backend=OpenBIOS ROM mapped at 1FC00000/BFC00000; HLE compatibility retained\n");
     return true;
 }
@@ -261,7 +285,63 @@ bool PsxRuntime::enableOpenBios(const std::string& path)
 void PsxRuntime::useHleBios()
 {
     m_biosBackend=BiosBackendHle;
+    m_openBiosKernelReady=false;
+    m_openBiosBootstrapActive=false;
+    m_openBiosCallActive=false;
+    m_openBiosVectorPc=0;
     tracePrintf("[RUNTIME] BIOS backend=existing HLE\n");
+}
+
+bool PsxRuntime::bootstrapOpenBiosKernel()
+{
+    if(m_biosBackend!=BiosBackendOpenBios || !m_memory.hasBiosRom())
+        return false;
+
+    const r3k::CpuState savedCpu=m_cpu;
+    m_cpu=r3k::CpuState();
+    m_cpu.pc=0xBFC00000u;
+    m_cpu.cop0[12]=0x00400000u; // reset/BEV context while running the ROM bootstrap
+    m_openBiosBootstrapActive=true;
+    m_openBiosCallActive=false;
+    m_openBiosVectorPc=0;
+
+    bool ready=false;
+    unsigned steps=0;
+    const unsigned kMaxBootstrapSteps=2000000u;
+
+    for(;steps<kMaxBootstrapSteps;++steps){
+        const uint32_t va=m_memory.rawRead32(0x000000A0u);
+        const uint32_t vb=m_memory.rawRead32(0x000000B0u);
+        const uint32_t vc=m_memory.rawRead32(0x000000C0u);
+        const uint32_t a0entry=m_memory.rawRead32(0x00000200u);
+        if(va!=0 && vb!=0 && vc!=0 && a0entry!=0){
+            ready=true;
+            break;
+        }
+        if(!stepOpenBios())
+            break;
+    }
+
+    m_openBiosBootstrapActive=false;
+    m_openBiosKernelReady=ready;
+    m_cpu=savedCpu;
+
+    if(ready){
+        tracePrintf("[OPENBIOS BOOTSTRAP] vectors ready steps=%u A0=%08X B0=%08X C0=%08X A0[0]=%08X\n",
+                    steps,
+                    (unsigned)m_memory.rawRead32(0x000000A0u),
+                    (unsigned)m_memory.rawRead32(0x000000B0u),
+                    (unsigned)m_memory.rawRead32(0x000000C0u),
+                    (unsigned)m_memory.rawRead32(0x00000200u));
+        return true;
+    }
+
+    tracePrintf("[OPENBIOS BOOTSTRAP FALLBACK] stopped steps=%u pc=%08X; using recomppsx HLE vectors\n",
+                steps,(unsigned)m_cpu.pc);
+    // Drop partial low-RAM kernel state. The ROM mapping remains loaded because
+    // PsxMemory::clear() intentionally does not clear the BIOS image.
+    m_memory.clear();
+    return false;
 }
 
 void PsxRuntime::advance(uint32_t cpuCycles)
@@ -317,7 +397,13 @@ void PsxRuntime::advance(uint32_t cpuCycles)
 
 bool PsxRuntime::stepOpenBios()
 {
-    if(m_biosBackend!=BiosBackendOpenBios || !m_memory.hasBiosRom() || !isOpenBiosPc(m_cpu.pc))
+    if(m_biosBackend!=BiosBackendOpenBios || !m_memory.hasBiosRom())
+        return false;
+
+    const bool romPc=isOpenBiosPc(m_cpu.pc);
+    const bool kernelRamPc=(m_openBiosBootstrapActive || m_openBiosCallActive) &&
+                           isOpenBiosKernelRamPc(m_cpu.pc);
+    if(!romPc && !kernelRamPc)
         return false;
 
     const uint32_t pc=m_cpu.pc;
@@ -344,6 +430,12 @@ bool PsxRuntime::stepOpenBios()
         }
         m_cpu.pc=pc+4u;
         m_cpu.gpr[0]=0;
+        if(m_openBiosCallActive && !isOpenBiosPc(m_cpu.pc) && !isOpenBiosKernelRamPc(m_cpu.pc)){
+            tracePrintf("[OPENBIOS RETURN] vector=%08X next=%08X v0=%08X\n",
+                        (unsigned)m_openBiosVectorPc,(unsigned)m_cpu.pc,(unsigned)m_cpu.gpr[2]);
+            m_openBiosCallActive=false;
+            m_openBiosVectorPc=0;
+        }
         return true;
     }
 
@@ -398,22 +490,58 @@ bool PsxRuntime::stepOpenBios()
 
     m_cpu.pc=take?target:next;
     m_cpu.gpr[0]=0;
+    if(m_openBiosCallActive && !isOpenBiosPc(m_cpu.pc) && !isOpenBiosKernelRamPc(m_cpu.pc)){
+        tracePrintf("[OPENBIOS RETURN] vector=%08X next=%08X v0=%08X\n",
+                    (unsigned)m_openBiosVectorPc,(unsigned)m_cpu.pc,(unsigned)m_cpu.gpr[2]);
+        m_openBiosCallActive=false;
+        m_openBiosVectorPc=0;
+    }
     return true;
 }
 
 bool PsxRuntime::handleHle()
 {
-    const uint32_t pcBefore = m_cpu.pc;
-    if(stepOpenBios()) return true;
-    // Compatibility mode is intentionally retained even with OpenBIOS mapped.
-    // ROM PCs are executed by stepOpenBios(), but direct PS-X EXE loading skips
-    // the BIOS boot sequence that normally installs the low-RAM A0/B0/C0 tables
-    // and exception state. Those vectors therefore continue through the proven
-    // recomppsx HLE path until OpenBIOS boot/vector handoff is enabled explicitly.
+    const uint32_t pcBefore=m_cpu.pc;
+
+    if(m_biosBackend==BiosBackendOpenBios && m_openBiosKernelReady &&
+       isBiosCallVector(m_cpu.pc) && !m_openBiosCallActive){
+        m_openBiosFallbackCpu=m_cpu;
+        m_openBiosCallActive=true;
+        m_openBiosVectorPc=m_cpu.pc;
+        tracePrintf("[OPENBIOS HANDOFF] vector=%08X fn=%02X ra=%08X\n",
+                    (unsigned)m_cpu.pc,(unsigned)(m_cpu.gpr[9]&0xFFu),(unsigned)m_cpu.gpr[31]);
+    }
+
+    const bool openPath=m_biosBackend==BiosBackendOpenBios &&
+        (isOpenBiosPc(m_cpu.pc) ||
+         (m_openBiosCallActive && isOpenBiosKernelRamPc(m_cpu.pc)));
+
+    if(stepOpenBios())
+        return true;
+
+    if(openPath && m_openBiosCallActive){
+        const uint32_t failedPc=m_cpu.pc;
+        const uint32_t vector=m_openBiosVectorPc;
+        m_cpu=m_openBiosFallbackCpu;
+        m_openBiosCallActive=false;
+        m_openBiosVectorPc=0;
+        tracePrintf("[OPENBIOS HLE FALLBACK] vector=%08X failedPC=%08X fn=%02X\n",
+                    (unsigned)vector,(unsigned)failedPc,(unsigned)(m_cpu.gpr[9]&0xFFu));
+    }
+
     if(m_biosBackend==BiosBackendOpenBios && !m_memory.hasBiosRom())
         m_biosBackend=BiosBackendHle;
-    if(m_bios.handleVector(m_cpu)){ tracePrintf("[HLE] vector pc=%08X -> %08X cycles=%llu\n", pcBefore, m_cpu.pc, (unsigned long long)m_cpu.cycles); return true; }
-    if(m_bios.handleExceptionVector(m_cpu)){ tracePrintf("[HLE] exception pc=%08X -> %08X cycles=%llu\n", pcBefore, m_cpu.pc, (unsigned long long)m_cpu.cycles); return true; }
+
+    if(m_bios.handleVector(m_cpu)){
+        tracePrintf("[HLE] vector pc=%08X -> %08X cycles=%llu\n",
+                    pcBefore,m_cpu.pc,(unsigned long long)m_cpu.cycles);
+        return true;
+    }
+    if(m_bios.handleExceptionVector(m_cpu)){
+        tracePrintf("[HLE] exception pc=%08X -> %08X cycles=%llu\n",
+                    pcBefore,m_cpu.pc,(unsigned long long)m_cpu.cycles);
+        return true;
+    }
     return false;
 }
 
