@@ -338,8 +338,12 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
         const uint32_t va=m_memory.rawRead32(0x000000A0u);
         const uint32_t vb=m_memory.rawRead32(0x000000B0u);
         const uint32_t vc=m_memory.rawRead32(0x000000C0u);
+        const uint32_t exc=m_memory.rawRead32(0x00000080u);
         const uint32_t a0entry=m_memory.rawRead32(0x00000200u);
-        if(va!=0 && vb!=0 && vc!=0 && a0entry!=0){
+        // Native BIOS calls need both the A0/B0/C0 trampolines and the general
+        // exception vector. SYSCALL enters 0x80000080, so stopping earlier would
+        // execute uninitialized low RAM.
+        if(va!=0 && vb!=0 && vc!=0 && exc!=0 && a0entry!=0){
             ready=true;
             break;
         }
@@ -353,11 +357,12 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
     m_cpu=savedCpu;
 
     if(ready){
-        tracePrintf("[OPENBIOS BOOTSTRAP] vectors ready steps=%u A0=%08X B0=%08X C0=%08X A0[0]=%08X\n",
+        tracePrintf("[OPENBIOS BOOTSTRAP] vectors ready steps=%u A0=%08X B0=%08X C0=%08X EXC80=%08X A0[0]=%08X\n",
                     steps,
                     (unsigned)m_memory.rawRead32(0x000000A0u),
                     (unsigned)m_memory.rawRead32(0x000000B0u),
                     (unsigned)m_memory.rawRead32(0x000000C0u),
+                    (unsigned)m_memory.rawRead32(0x00000080u),
                     (unsigned)m_memory.rawRead32(0x00000200u));
         return true;
     }
