@@ -43,6 +43,7 @@ private:
     bool dequeueIntRp(uint32_t priority, uint32_t struc);
     bool startInterruptChain(r3k::CpuState& cpu, const r3k::CpuState& resumeState);
     bool continueInterruptChain(r3k::CpuState& cpu);
+    bool serviceCdromInterrupt(uint32_t& callback);
 
     void callA(r3k::CpuState& cpu, uint8_t fn);
     void callB(r3k::CpuState& cpu, uint8_t fn);
@@ -61,6 +62,13 @@ private:
     uint32_t m_padSize1=0, m_padSize2=0;
     bool m_padEnabled=false;
     bool m_clearPad=true;
+
+    // Retail BIOS CD-ROM interrupt service (_96_init / EnqueueCdIntr).
+    // It represents the BIOS-owned priority-0 SysIntRP element that direct
+    // PS-X EXE loading would otherwise skip.
+    bool m_cdBiosIrqInstalled=false;
+    uint8_t m_cdLastStatus=0;
+    uint8_t m_cdLastError=0;
 
     // Callback BIOS mode 0x1000 runs guest code and returns through an HLE
     // trampoline.  The interrupted CPU context is restored at the trampoline.
