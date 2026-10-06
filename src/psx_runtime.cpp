@@ -416,6 +416,8 @@ bool PsxRuntime::stepOpenBios()
     if(!romPc && !kernelRamPc)
         return false;
 
+    m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
+
     const uint32_t pc=m_cpu.pc;
     const Decoded d=decode(m_memory.read32(pc));
     ++m_cpu.cycles;
@@ -440,6 +442,7 @@ bool PsxRuntime::stepOpenBios()
         }
         m_cpu.pc=pc+4u;
         m_cpu.gpr[0]=0;
+        m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
         if(m_openBiosCallActive && !isOpenBiosPc(m_cpu.pc) && !isOpenBiosKernelRamPc(m_cpu.pc)){
             tracePrintf("[OPENBIOS RETURN] vector=%08X next=%08X v0=%08X\n",
                         (unsigned)m_openBiosVectorPc,(unsigned)m_cpu.pc,(unsigned)m_cpu.gpr[2]);
@@ -492,6 +495,7 @@ bool PsxRuntime::stepOpenBios()
     const uint32_t delayPc=pc+4u;
     const Decoded delay=decode(m_memory.read32(delayPc));
     ++m_cpu.cycles;
+    m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
     if(!biosExecNonControl(m_cpu,m_memory,m_gte,delay)){
         tracePrintf("[OPENBIOS DELAY UNSUPPORTED] pc=%08X raw=%08X\n",
                     (unsigned)delayPc,(unsigned)delay.raw);
@@ -500,6 +504,7 @@ bool PsxRuntime::stepOpenBios()
 
     m_cpu.pc=take?target:next;
     m_cpu.gpr[0]=0;
+    m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
     if(m_openBiosCallActive && !isOpenBiosPc(m_cpu.pc) && !isOpenBiosKernelRamPc(m_cpu.pc)){
         tracePrintf("[OPENBIOS RETURN] vector=%08X next=%08X v0=%08X\n",
                     (unsigned)m_openBiosVectorPc,(unsigned)m_cpu.pc,(unsigned)m_cpu.gpr[2]);
@@ -533,6 +538,7 @@ bool PsxRuntime::handleHle()
         const uint32_t failedPc=m_cpu.pc;
         const uint32_t vector=m_openBiosVectorPc;
         m_cpu=m_openBiosFallbackCpu;
+        m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
         m_openBiosCallActive=false;
         m_openBiosVectorPc=0;
         tracePrintf("[OPENBIOS HLE FALLBACK] vector=%08X failedPC=%08X fn=%02X\n",
