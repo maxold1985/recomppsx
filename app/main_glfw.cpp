@@ -5,6 +5,10 @@
 #include "psxgpu/psx_gpu_gl.h"
 
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#  define GLFW_EXPOSE_NATIVE_WIN32
+#  include <GLFW/glfw3native.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
@@ -23,6 +27,104 @@
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
+
+enum {
+    IDC_LOG_BUTTON = 4100,
+    IDC_LOG_CPU,
+    IDC_LOG_GPU,
+    IDC_LOG_IRQ,
+    IDC_LOG_BIOS,
+    IDC_LOG_CD,
+    IDC_LOG_DMA,
+    IDC_LOG_HLE,
+    IDC_LOG_RUNTIME,
+    IDC_LOG_OTHER
+};
+
+struct LogControls {
+    HWND button;
+    HWND checks[psxrecomp::TraceCategoryCount];
+    bool visible;
+    LogControls() : button(0), visible(false) {
+        for (int i=0;i<psxrecomp::TraceCategoryCount;++i) checks[i]=0;
+    }
+};
+
+LogControls g_logControls;
+
+void set_log_panel_visible(bool visible)
+{
+    g_logControls.visible=visible;
+    for(int i=0;i<psxrecomp::TraceCategoryCount;++i)
+        if(g_logControls.checks[i])
+            ShowWindow(g_logControls.checks[i], visible ? SW_SHOW : SW_HIDE);
+}
+
+void sync_log_checkboxes()
+{
+    for(int i=0;i<psxrecomp::TraceCategoryCount;++i){
+        if(!g_logControls.checks[i]) continue;
+        const LRESULT checked=SendMessageA(g_logControls.checks[i],BM_GETCHECK,0,0);
+        psxrecomp::traceSetCategoryEnabled(
+            static_cast<psxrecomp::TraceCategory>(i),
+            checked==BST_CHECKED);
+    }
+}
+
+LRESULT CALLBACK log_panel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    WNDPROC oldProc=reinterpret_cast<WNDPROC>(
+        GetPropA(hwnd,"PSX_OLD_WNDPROC"));
+
+    if(msg==WM_COMMAND){
+        const int id=LOWORD(wp);
+        if(id==IDC_LOG_BUTTON && HIWORD(wp)==BN_CLICKED){
+            set_log_panel_visible(!g_logControls.visible);
+            return 0;
+        }
+        if(id>=IDC_LOG_CPU && id<=IDC_LOG_OTHER && HIWORD(wp)==BN_CLICKED){
+            sync_log_checkboxes();
+            return 0;
+        }
+    }
+    return oldProc ? CallWindowProcA(oldProc,hwnd,msg,wp,lp)
+                   : DefWindowProcA(hwnd,msg,wp,lp);
+}
+
+void create_log_controls(GLFWwindow* window)
+{
+    HWND hwnd=glfwGetWin32Window(window);
+    if(!hwnd) return;
+
+    WNDPROC oldProc=reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrA(hwnd,GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(log_panel_proc)));
+    SetPropA(hwnd,"PSX_OLD_WNDPROC",reinterpret_cast<HANDLE>(oldProc));
+
+    HFONT font=static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    g_logControls.button=CreateWindowA("BUTTON","Logs",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,8,8,72,24,
+        hwnd,reinterpret_cast<HMENU>(IDC_LOG_BUTTON),
+        GetModuleHandleA(0),0);
+    SendMessageA(g_logControls.button,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+
+    const char* names[psxrecomp::TraceCategoryCount]={
+        "CPU","GPU","IRQ","BIOS","CD-ROM","DMA","HLE","Runtime","Other"
+    };
+    for(int i=0;i<psxrecomp::TraceCategoryCount;++i){
+        g_logControls.checks[i]=CreateWindowA("BUTTON",names[i],
+            WS_CHILD|BS_AUTOCHECKBOX,8,38+i*23,100,21,
+            hwnd,reinterpret_cast<HMENU>(IDC_LOG_CPU+i),
+            GetModuleHandleA(0),0);
+        SendMessageA(g_logControls.checks[i],WM_SETFONT,
+            reinterpret_cast<WPARAM>(font),TRUE);
+        SendMessageA(g_logControls.checks[i],BM_SETCHECK,
+            psxrecomp::traceCategoryEnabled(
+                static_cast<psxrecomp::TraceCategory>(i))
+                ? BST_CHECKED : BST_UNCHECKED,0);
+    }
+    set_log_panel_visible(false);
+}
 #endif
 
 namespace {
@@ -210,6 +312,9 @@ int main(int argc, char** argv)
 
         glfwMakeContextCurrent(window);
         glfwSwapInterval(1);
+#ifdef _WIN32
+        create_log_controls(window);
+#endif
 
         const GLubyte* glVersion = glGetString(GL_VERSION);
         const GLubyte* glRenderer = glGetString(GL_RENDERER);
