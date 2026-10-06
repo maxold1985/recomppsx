@@ -49,10 +49,29 @@ bool BiosHle::serviceCdromInterrupt(uint32_t& callback)
     if(!m_cdBiosIrqInstalled || (pending & IrqController::Cdrom)==0)
         return false;
 
-    // A game that explicitly installs a priority-0 SysIntRP entry owns the
-    // CD-ROM interrupt path. Do not steal the interrupt from that guest ISR.
-    if(m_intRpHeads[0]!=0){
-        tracePrintf("[BIOS CD IRQ] guest priority0 handler present; defer to SysIntRP\n");
+    // Do not steal a raw decoder IRQ unless software actually uses the BIOS
+    // CD event interface. PsyQ/libcd can install its own interrupt path and
+    // poll/update command state outside OpenEvent/DeliverEvent. Consuming
+    // HINTSTS/I_STAT here would make that code wait until its timeout.
+    bool haveCdEvent=false;
+    for(const auto& e:m_events){
+        if(e.used && e.enabled && e.cls==0xF0000003u){
+            haveCdEvent=true;
+            break;
+        }
+    }
+
+    // A game that explicitly installs a priority-0 SysIntRP entry also owns
+    // the CD-ROM interrupt path.
+    if(m_intRpHeads[0]!=0 || !haveCdEvent){
+        tracePrintf(
+            "[BIOS CD IRQ] defer to guest path priority0=%u biosEvent=%u "
+            "flags=%02X I_STAT=%04X\n",
+            m_intRpHeads[0]!=0 ? 1u : 0u,
+            haveCdEvent ? 1u : 0u,
+            (unsigned)m_cdrom.irqFlags(),
+            (unsigned)m_irq.stat()
+        );
         return false;
     }
 
@@ -644,8 +663,9 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
     // before guest Card/PAD chains (typically priorities 1/2), then recompute
     // pending sources so an already-consumed CD IRQ is not misrouted.
     if(pending & IrqController::Cdrom){
-        serviceCdromInterrupt(irqCallback);
-        pending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
+        const bool cdConsumed=serviceCdromInterrupt(irqCallback);
+        if(cdConsumed)
+            pending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
     }
 
     /*
