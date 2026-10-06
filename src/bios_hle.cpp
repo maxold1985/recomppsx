@@ -24,6 +24,18 @@ void BiosHle::reset()
     m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainPending=0; m_irqChainInSecond=false;
 }
 
+void BiosHle::initializeCdrom()
+{
+    // Loading a PS-X EXE directly skips the retail BIOS boot path. The BIOS
+    // normally calls _96_init() before transferring control to the executable,
+    // so reproduce the externally visible CD decoder setup here.
+    m_cdrom.write8(0x1F801800u, 0x01u); // bank 1
+    m_cdrom.write8(0x1F801802u, 0x1Fu); // HINTMSK: INT1..INT5/BF flags
+    m_cdrom.write8(0x1F801803u, 0x1Fu); // clear stale HINTSTS low bits
+    m_cdrom.write8(0x1F801800u, 0x00u); // bank 0
+    tracePrintf("[BIOS CD INIT] post-boot _96_init HINTMSK=1F\n");
+}
+
 uint32_t BiosHle::arg(const r3k::CpuState& cpu,unsigned index) const
 {
     if(index<4) return cpu.gpr[4+index];
@@ -264,13 +276,7 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
         case 0x4E: c.gpr[2]=0; break; // gpu_sync: immediate in HLE
         case 0x54: // _96_init (alias)
         case 0x71: { // _96_init
-            // Retail BIOS initializes the CD-ROM subsystem before normal use.
-            // Program the decoder IRQ mask through its real banked MMIO path:
-            // bank 1, HINTMSK at 1F801802h, then restore bank 0.
-            m_cdrom.write8(0x1F801800u, 0x01u);
-            m_cdrom.write8(0x1F801802u, 0x1Fu);
-            m_cdrom.write8(0x1F801800u, 0x00u);
-            tracePrintf("[BIOS CD INIT] _96_init HINTMSK=1F\n");
+            initializeCdrom();
             c.gpr[2]=1;
             break;
         }
