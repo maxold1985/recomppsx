@@ -117,6 +117,12 @@ private:
     uint8_t m_secondResponseIrq = 0;
     uint32_t m_secondResponseCycles = 0;
 
+    // The HC05 does not execute a newly written command while HINTSTS still
+    // contains an unacknowledged response. The command register holds the most
+    // recent write and execution resumes after the pending interrupt is ACKed.
+    bool m_pendingCommandActive = false;
+    uint8_t m_pendingCommand = 0;
+
     std::deque<uint8_t> m_params;
     std::deque<uint8_t> m_response;
     std::deque<uint8_t> m_data;
