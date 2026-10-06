@@ -72,6 +72,7 @@ private:
     bool dequeueIntRp(uint32_t priority, uint32_t struc);
     bool startInterruptChain(r3k::CpuState& cpu, const r3k::CpuState& resumeState);
     bool continueInterruptChain(r3k::CpuState& cpu);
+    bool beginEntryIntHook(r3k::CpuState& cpu, const r3k::CpuState& resumeState);
     bool serviceCdromInterrupt(uint32_t& callback);
     bool serviceRetailCdromIntRp(uint32_t& callback);
 
@@ -127,6 +128,12 @@ private:
     std::array<Thread,4> m_threads;
     unsigned m_currentThread=0;
     bool m_threadSwitchPerformed=false;
+
+    // HookEntryInt/ResetEntryInt state. The game records a setjmp-style frame
+    // and expects it to run at the end of BIOS exception processing.
+    uint32_t m_entryIntHook=0;
+    bool m_entryIntHookActive=false;
+    r3k::CpuState m_entryIntResumeState;
 
     // Two formatted in-memory 128 KiB memory cards. File functions B32/B34/B35/
     // B36/B42/B43 operate on the same raw sectors used by B4E/B4F.
