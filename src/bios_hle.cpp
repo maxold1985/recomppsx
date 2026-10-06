@@ -19,6 +19,9 @@ void BiosHle::reset()
     m_intRpHeads.fill(0);
     m_padBuf1=m_padBuf2=m_padButtonDest=0; m_padSize1=m_padSize2=0; m_padEnabled=false; m_clearPad=true;
     m_eventCallbackActive=false; m_eventCallbackFunc=0; m_eventResumeState=r3k::CpuState();
+    m_irqChainActive=false; m_irqResumeState=r3k::CpuState();
+    m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
+    m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainInSecond=false;
 }
 
 uint32_t BiosHle::arg(const r3k::CpuState& cpu,unsigned index) const
@@ -126,17 +129,96 @@ bool BiosHle::dequeueIntRp(uint32_t priority,uint32_t struc)
     return false;
 }
 
-uint32_t BiosHle::firstInterruptRoutine() const
+bool BiosHle::startInterruptChain(r3k::CpuState& c,const r3k::CpuState& resumeState)
 {
-    for(std::size_t p=0;p<m_intRpHeads.size();++p){
-        uint32_t cur=m_intRpHeads[p];
-        for(unsigned guard=0;cur && guard<256;++guard){
-            const uint32_t func=m_mem.read32(cur+8u);
-            if(func) return func;
-            cur=m_mem.read32(cur);
-        }
+    if(m_irqChainActive || m_eventCallbackActive) return false;
+
+    m_irqResumeState=resumeState;
+    m_irqChainPriority=0;
+    m_irqChainStruct=0;
+    m_irqChainNext=0;
+    m_irqChainSecond=0;
+    m_irqChainFunc=0;
+    m_irqChainInSecond=false;
+
+    for(uint32_t p=0;p<m_intRpHeads.size();++p){
+        const uint32_t s=m_intRpHeads[p];
+        if(!s) continue;
+        const uint32_t first=m_mem.read32(s+8u);
+        if(!first) continue;
+
+        m_irqChainActive=true;
+        m_irqChainPriority=p;
+        m_irqChainStruct=s;
+        m_irqChainNext=m_mem.read32(s+0u);
+        m_irqChainSecond=m_mem.read32(s+4u);
+        m_irqChainFunc=first;
+        c.pc=first;
+        c.gpr[31]=kEventCallbackTrampoline;
+        c.gpr[2]=0;
+        tracePrintf("[BIOS IRQ CHAIN BEGIN] prio=%u struc=%08X first=%08X second=%08X next=%08X\n",
+            (unsigned)p,(unsigned)s,(unsigned)first,(unsigned)m_irqChainSecond,(unsigned)m_irqChainNext);
+        return true;
     }
-    return 0;
+    return false;
+}
+
+bool BiosHle::continueInterruptChain(r3k::CpuState& c)
+{
+    if(!m_irqChainActive) return false;
+
+    const uint32_t result=c.gpr[2];
+    tracePrintf("[BIOS IRQ CHAIN RETURN] prio=%u struc=%08X func=%08X phase=%s v0=%08X\n",
+        (unsigned)m_irqChainPriority,(unsigned)m_irqChainStruct,(unsigned)m_irqChainFunc,
+        m_irqChainInSecond?"SECOND":"FIRST",(unsigned)result);
+
+    if(!m_irqChainInSecond && result!=0 && m_irqChainSecond!=0){
+        m_irqChainInSecond=true;
+        m_irqChainFunc=m_irqChainSecond;
+        c.pc=m_irqChainSecond;
+        c.gpr[31]=kEventCallbackTrampoline;
+        tracePrintf("[BIOS IRQ CHAIN SECOND] prio=%u struc=%08X func=%08X\n",
+            (unsigned)m_irqChainPriority,(unsigned)m_irqChainStruct,(unsigned)m_irqChainSecond);
+        return true;
+    }
+
+    uint32_t next=m_irqChainNext;
+    uint32_t priority=m_irqChainPriority;
+    for(;;){
+        if(next){
+            const uint32_t s=next;
+            next=m_mem.read32(s+0u);
+            const uint32_t first=m_mem.read32(s+8u);
+            if(first){
+                m_irqChainStruct=s;
+                m_irqChainNext=next;
+                m_irqChainSecond=m_mem.read32(s+4u);
+                m_irqChainFunc=first;
+                m_irqChainInSecond=false;
+                c.pc=first;
+                c.gpr[31]=kEventCallbackTrampoline;
+                c.gpr[2]=0;
+                tracePrintf("[BIOS IRQ CHAIN NEXT] prio=%u struc=%08X first=%08X second=%08X next=%08X\n",
+                    (unsigned)priority,(unsigned)s,(unsigned)first,(unsigned)m_irqChainSecond,(unsigned)next);
+                return true;
+            }
+            continue;
+        }
+
+        ++priority;
+        if(priority>=m_intRpHeads.size()) break;
+        next=m_intRpHeads[priority];
+    }
+
+    const uint64_t cycles=c.cycles;
+    c=m_irqResumeState;
+    c.cycles=cycles;
+    m_irqChainActive=false;
+    m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
+    m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainInSecond=false;
+    tracePrintf("[BIOS IRQ CHAIN END] resumePC=%08X cycles=%llu\n",
+        (unsigned)c.pc,(unsigned long long)c.cycles);
+    return true;
 }
 
 void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
@@ -231,6 +313,7 @@ void BiosHle::callC(r3k::CpuState& c,uint8_t fn)
 bool BiosHle::handleVector(r3k::CpuState& c)
 {
     const uint32_t p=c.pc&0x1FFFFFFFu;
+    if(p==(kEventCallbackTrampoline&0x1FFFFFFFu) && m_irqChainActive) return continueInterruptChain(c);
     if(p==(kEventCallbackTrampoline&0x1FFFFFFFu) && m_eventCallbackActive) return finishEventCallback(c);
     if(p!=0xA0u&&p!=0xB0u&&p!=0xC0u)return false;
     const uint8_t fn=uint8_t(c.gpr[9]);
@@ -526,11 +609,8 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
      * O trampoline restaura todo o contexto interrompido depois do jr ra.
      */
     c.pc = c.cop0[14];
-    const uint32_t intRoutine = pending ? firstInterruptRoutine() : 0u;
-    if(intRoutine){
-        tracePrintf("[BIOS IRQ CHAIN] pending=%04X func=%08X\n",
-                    (unsigned)pending,(unsigned)intRoutine);
-        beginEventCallback(c,resumeState,intRoutine);
+    if(pending && startInterruptChain(c,resumeState)){
+        tracePrintf("[BIOS IRQ CHAIN DISPATCH] pending=%04X\n",(unsigned)pending);
     } else if(irqCallback){
         beginEventCallback(c,resumeState,irqCallback);
     }
