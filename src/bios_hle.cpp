@@ -193,6 +193,14 @@ void BiosHle::observeNativeVectorCall(uint32_t vector,const r3k::CpuState& befor
                 const uint32_t prio=before.gpr[4];
                 const uint32_t struc=before.gpr[5];
                 if(prio<m_intRpHeads.size() && struc) m_intRpHeads[prio]=struc;
+                tracePrintf(
+                    "[BIOS NATIVE MIRROR SysEnqIntRP] prio=%u struc=%08X "
+                    "first=%08X second=%08X\n",
+                    (unsigned)prio,
+                    (unsigned)struc,
+                    (unsigned)(struc ? m_mem.read32(struc+8u) : 0u),
+                    (unsigned)(struc ? m_mem.read32(struc+4u) : 0u)
+                );
                 break;
             }
             case 0x03: {
@@ -1561,6 +1569,35 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
     );
 
     std::fflush(stdout);
+
+    /*
+     * PsyQ/libetc installs HookEntryInt and libcd handles IRQ2 from that guest
+     * callback path. When IRQ2 is the only pending source, do not let the HLE
+     * retail _96 handler consume HINTSTS/response FIFO first: that leaves
+     * CD_sync/CD_ready waiting forever because their command state never sees
+     * the decoder interrupt.
+     *
+     * Deliver the raw IRQ to the already-installed guest hook. The hook itself
+     * owns I_STAT/HINTSTS acknowledgement and then calls ReturnFromException.
+     */
+    const bool guestOwnsRawCdIrq =
+        pending==IrqController::Cdrom &&
+        m_entryIntHook!=0 &&
+        !m_entryIntHookActive;
+
+    if(guestOwnsRawCdIrq){
+        tracePrintf(
+            "[BIOS CD GUEST HOOK] pending=%04X flags=%02X I_STAT=%04X "
+            "entry=%08X resumePC=%08X\n",
+            (unsigned)pending,
+            (unsigned)m_cdrom.irqFlags(),
+            (unsigned)m_irq.stat(),
+            (unsigned)m_entryIntHook,
+            (unsigned)resumeState.pc
+        );
+        beginEntryIntHook(c,resumeState);
+        return true;
+    }
 
     // The retail BIOS CD handler is a priority-0 SysIntRP entry. Service it
     // before guest Card/PAD chains (typically priorities 1/2), then recompute
