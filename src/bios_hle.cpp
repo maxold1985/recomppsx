@@ -262,6 +262,18 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
         }
         case 0x4D: c.gpr[2]=m_mem.read32(psxgpu::PsxGpuMmio::GP1); break;
         case 0x4E: c.gpr[2]=0; break; // gpu_sync: immediate in HLE
+        case 0x54: // _96_init (alias)
+        case 0x71: { // _96_init
+            // Retail BIOS initializes the CD-ROM subsystem before normal use.
+            // Program the decoder IRQ mask through its real banked MMIO path:
+            // bank 1, HINTMSK at 1F801802h, then restore bank 0.
+            m_cdrom.write8(0x1F801800u, 0x01u);
+            m_cdrom.write8(0x1F801802u, 0x1Fu);
+            m_cdrom.write8(0x1F801800u, 0x00u);
+            tracePrintf("[BIOS CD INIT] _96_init HINTMSK=1F\n");
+            c.gpr[2]=1;
+            break;
+        }
         case 0xA5: { // CdReadSector(count, sector, buffer)
             const uint32_t count=arg(c,0),sector=arg(c,1),dst=arg(c,2);
             std::vector<uint8_t> buf(std::size_t(count)*2048u);
