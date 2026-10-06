@@ -16,6 +16,7 @@ const uint32_t kIStat = 0x1F801070u;
 const uint32_t kIMask = 0x1F801074u;
 const uint32_t kDmaBase = 0x1F801080u;
 const uint32_t kDicr = 0x1F8010F4u;
+const uint32_t kCacheControl = 0x1FFE0130u;
 }
 
 PsxMemory::PsxMemory(psxgpu::PsxGpu& gpu, IrqController& irq, PsxTimers& timers,
@@ -65,6 +66,8 @@ void PsxMemory::clear()
     m_ram.fill(0); m_scratchpad.fill(0); m_io.fill(0);
     for (auto& d : m_dma) d = DmaChannel();
     m_dicr = 0;
+    m_cacheControl = 0;
+    m_cacheIsolated = false;
 }
 
 uint8_t PsxMemory::rawRead8(uint32_t addr) const
@@ -249,6 +252,8 @@ void PsxMemory::writeIo32(uint32_t p,uint32_t v)
 uint8_t PsxMemory::read8(uint32_t addr)
 {
     const uint32_t p=physical(addr),base=p&~3u;
+    if(p>=kCacheControl && p<kCacheControl+4u)
+        return uint8_t(m_cacheControl>>((p-kCacheControl)*8u));
     if(isGpuMmio32(base)){const uint32_t v=m_gpuMmio.read32(base);return uint8_t(v>>((p&3u)*8u));}
     if(isCoreIo(p)) return readIo8(p);
     if(p>=kIoBase&&p<kIoEnd)return readIo8(p);
@@ -258,6 +263,8 @@ uint8_t PsxMemory::read8(uint32_t addr)
 uint16_t PsxMemory::read16(uint32_t addr)
 {
     const uint32_t p=physical(addr),base=p&~3u;
+    if(p==kCacheControl || p==kCacheControl+2u)
+        return uint16_t(m_cacheControl>>((p-kCacheControl)*8u));
     if((p&3u)<=2u&&isGpuMmio32(base)){const uint32_t v=m_gpuMmio.read32(base);return uint16_t(v>>((p&2u)*8u));}
     if(isCoreIo(p)) return readIo16(p);
     return uint16_t(read8(addr))|(uint16_t(read8(addr+1))<<8);
@@ -266,6 +273,7 @@ uint16_t PsxMemory::read16(uint32_t addr)
 uint32_t PsxMemory::read32(uint32_t addr)
 {
     const uint32_t p=physical(addr);
+    if(p==kCacheControl) return m_cacheControl;
     if((p&3u)==0&&isGpuMmio32(p))return m_gpuMmio.read32(p);
     if(isCoreIo(p))return readIo32(p);
     return uint32_t(read16(addr))|(uint32_t(read16(addr+2))<<16);
@@ -274,6 +282,22 @@ uint32_t PsxMemory::read32(uint32_t addr)
 void PsxMemory::write8(uint32_t addr,uint8_t value)
 {
     const uint32_t p=physical(addr),base=p&~3u;
+    if(p>=kCacheControl && p<kCacheControl+4u){
+        const uint32_t sh=(p-kCacheControl)*8u;
+        m_cacheControl=(m_cacheControl&~(0xFFu<<sh))|(uint32_t(value)<<sh);
+        tracePrintf("[CACHE CTRL W8] addr=%08X value=%02X BCC=%08X\n",
+                    (unsigned)addr,(unsigned)value,(unsigned)m_cacheControl);
+        return;
+    }
+    if(m_cacheIsolated && p<0x00800000u && addr<0xA0000000u){
+        static unsigned isolatedStore8Log=0;
+        if(isolatedStore8Log<8u){
+            tracePrintf("[CACHE ISOLATE STORE8] addr=%08X value=%02X discarded\n",
+                        (unsigned)addr,(unsigned)value);
+            ++isolatedStore8Log;
+        }
+        return;
+    }
     if(isGpuMmio32(base)){uint32_t old=m_gpuMmio.read32(base);const uint32_t sh=(p&3u)*8u;old=(old&~(0xFFu<<sh))|(uint32_t(value)<<sh);m_gpuMmio.write32(base,old);return;}
     if(isCoreIo(p)|| (p>=kIoBase&&p<kIoEnd)){writeIo8(p,value);return;}
     rawWrite8(p,value);
@@ -282,6 +306,22 @@ void PsxMemory::write8(uint32_t addr,uint8_t value)
 void PsxMemory::write16(uint32_t addr,uint16_t value)
 {
     const uint32_t p=physical(addr),base=p&~3u;
+    if(p==kCacheControl || p==kCacheControl+2u){
+        const uint32_t sh=(p-kCacheControl)*8u;
+        m_cacheControl=(m_cacheControl&~(0xFFFFu<<sh))|(uint32_t(value)<<sh);
+        tracePrintf("[CACHE CTRL W16] addr=%08X value=%04X BCC=%08X\n",
+                    (unsigned)addr,(unsigned)value,(unsigned)m_cacheControl);
+        return;
+    }
+    if(m_cacheIsolated && p<0x00800000u && addr<0xA0000000u){
+        static unsigned isolatedStore16Log=0;
+        if(isolatedStore16Log<8u){
+            tracePrintf("[CACHE ISOLATE STORE16] addr=%08X value=%04X discarded\n",
+                        (unsigned)addr,(unsigned)value);
+            ++isolatedStore16Log;
+        }
+        return;
+    }
     if((p&3u)<=2u&&isGpuMmio32(base)){uint32_t old=m_gpuMmio.read32(base);const uint32_t sh=(p&2u)*8u;old=(old&~(0xFFFFu<<sh))|(uint32_t(value)<<sh);m_gpuMmio.write32(base,old);return;}
     if(isCoreIo(p)){writeIo16(p,value);return;}
     write8(addr,uint8_t(value));write8(addr+1,uint8_t(value>>8));
@@ -290,6 +330,21 @@ void PsxMemory::write16(uint32_t addr,uint16_t value)
 void PsxMemory::write32(uint32_t addr,uint32_t value)
 {
     const uint32_t p=physical(addr);
+    if(p==kCacheControl){
+        m_cacheControl=value;
+        tracePrintf("[CACHE CTRL W32] addr=%08X value=%08X\n",
+                    (unsigned)addr,(unsigned)value);
+        return;
+    }
+    if(m_cacheIsolated && p<0x00800000u && addr<0xA0000000u){
+        static unsigned isolatedStore32Log=0;
+        if(isolatedStore32Log<32u){
+            tracePrintf("[CACHE ISOLATE STORE32] addr=%08X value=%08X BCC=%08X discarded\n",
+                        (unsigned)addr,(unsigned)value,(unsigned)m_cacheControl);
+            ++isolatedStore32Log;
+        }
+        return;
+    }
     if((p&3u)==0&&isGpuMmio32(p)){
         m_gpuMmio.write32(p,value);
         if(p==psxgpu::PsxGpuMmio::DMA2_CHCR&&(value&(1u<<24)))updateDmaIrq(2);
