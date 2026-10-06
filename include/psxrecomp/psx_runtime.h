@@ -40,6 +40,7 @@ public:
     bool handleHle();
     bool stepOpenBios();
     bool bootstrapOpenBiosKernel();
+    bool initializeOpenBiosCdrom();
 
     r3k::CpuState& cpu() { return m_cpu; }
     PsxMemory& memory() { return m_memory; }
