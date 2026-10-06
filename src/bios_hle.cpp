@@ -27,6 +27,9 @@ void BiosHle::reset()
     m_threads[0].used=true;
     m_currentThread=0;
     m_threadSwitchPerformed=false;
+    m_entryIntHook=0;
+    m_entryIntHookActive=false;
+    m_entryIntResumeState=r3k::CpuState();
 
     m_files.fill(FileHandle());
     m_find=FindState();
@@ -318,6 +321,27 @@ uint32_t BiosHle::changeThread(r3k::CpuState& cpu,uint32_t handle)
     tracePrintf("[BIOS THREAD SWITCH] new=%u pc=%08X sp=%08X\n",
                 m_currentThread,(unsigned)cpu.pc,(unsigned)cpu.gpr[29]);
     return 1;
+}
+
+bool BiosHle::beginEntryIntHook(r3k::CpuState& c,const r3k::CpuState& resumeState)
+{
+    if(m_entryIntHook==0 || m_entryIntHookActive) return false;
+
+    const uint32_t b=m_entryIntHook;
+    m_entryIntResumeState=resumeState;
+    m_entryIntHookActive=true;
+
+    c.gpr[31]=m_mem.read32(b+0x00u);
+    c.gpr[29]=m_mem.read32(b+0x04u);
+    c.gpr[30]=m_mem.read32(b+0x08u);
+    for(unsigned i=0;i<8u;++i) c.gpr[16u+i]=m_mem.read32(b+0x0Cu+i*4u);
+    c.gpr[28]=m_mem.read32(b+0x2Cu);
+    c.gpr[2]=1;
+    c.pc=c.gpr[31];
+
+    tracePrintf("[BIOS ENTRY HOOK BEGIN] frame=%08X pc=%08X sp=%08X resume=%08X\n",
+                (unsigned)b,(unsigned)c.pc,(unsigned)c.gpr[29],(unsigned)resumeState.pc);
+    return true;
 }
 
 bool BiosHle::wildcardMatch(const std::string& pattern,const std::string& value)
@@ -855,11 +879,20 @@ bool BiosHle::continueInterruptChain(r3k::CpuState& c)
     }
 
     const uint64_t cycles=c.cycles;
-    c=m_irqResumeState;
-    c.cycles=cycles;
+    const r3k::CpuState resume=m_irqResumeState;
     m_irqChainActive=false;
     m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
     m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainPending=0; m_irqChainInSecond=false;
+
+    if(beginEntryIntHook(c,resume)){
+        c.cycles=cycles;
+        tracePrintf("[BIOS IRQ CHAIN END] dispatch-entry-hook resumePC=%08X cycles=%llu\n",
+                    (unsigned)resume.pc,(unsigned long long)c.cycles);
+        return true;
+    }
+
+    c=resume;
+    c.cycles=cycles;
     tracePrintf("[BIOS IRQ CHAIN END] resumePC=%08X cycles=%llu\n",
         (unsigned)c.pc,(unsigned long long)c.cycles);
     return true;
@@ -1193,9 +1226,38 @@ void BiosHle::callB(r3k::CpuState& c,uint8_t fn)
             const uint16_t rev=uint16_t((al>>8)|(al<<8));
             c.gpr[2]=0xFFFF0000u|rev;if(m_padButtonDest)m_mem.write32(m_padButtonDest,c.gpr[2]);break;}
         case 0x17: { // ReturnFromException
-            uint32_t low=c.cop0[12]&0x3Fu;c.cop0[12]=(c.cop0[12]&~0x3Fu)|((low>>2)&0x0Fu);c.pc=c.cop0[14];c.gpr[2]=1;return; }
-        case 0x18: c.gpr[2]=1; break; // ResetEntryInt
-        case 0x19: c.gpr[2]=1; break; // HookEntryInt accepted by simplified HLE
+            if(m_entryIntHookActive){
+                const uint64_t cycles=c.cycles;
+                c=m_entryIntResumeState;
+                c.cycles=cycles;
+                m_entryIntHookActive=false;
+                tracePrintf("[BIOS ENTRY HOOK END] resumePC=%08X cycles=%llu\n",
+                            (unsigned)c.pc,(unsigned long long)c.cycles);
+                return;
+            }
+            uint32_t low=c.cop0[12]&0x3Fu;
+            c.cop0[12]=(c.cop0[12]&~0x3Fu)|((low>>2)&0x0Fu);
+            c.pc=c.cop0[14];
+            c.gpr[2]=1;
+            return;
+        }
+        case 0x18: { // ResetEntryInt
+            m_entryIntHook=0;
+            m_entryIntHookActive=false;
+            c.gpr[2]=0;
+            tracePrintf("[BIOS ENTRY HOOK RESET]\n");
+            break;
+        }
+        case 0x19: { // HookEntryInt(setjmp-style frame)
+            m_entryIntHook=arg(c,0);
+            m_entryIntHookActive=false;
+            c.gpr[2]=m_entryIntHook;
+            tracePrintf("[BIOS ENTRY HOOK INSTALL] frame=%08X savedPC=%08X savedSP=%08X\n",
+                        (unsigned)m_entryIntHook,
+                        (unsigned)(m_entryIntHook?m_mem.read32(m_entryIntHook+0x00u):0u),
+                        (unsigned)(m_entryIntHook?m_mem.read32(m_entryIntHook+0x04u):0u));
+            break;
+        }
         case 0x32: { // open
             const std::string path=readString(arg(c,0));
             c.gpr[2]=static_cast<uint32_t>(openBiosFile(path,arg(c,1)));
@@ -1216,6 +1278,7 @@ void BiosHle::callB(r3k::CpuState& c,uint8_t fn)
         case 0x4A: { // InitCARD2
             m_cardInitialized=true;
             m_cardStatus[0]=m_cardStatus[1]=1;
+            m_padEnabled=arg(c,0)!=0;
             tracePrintf("[BIOS CARD InitCARD2] pad_enable=%08X\n",(unsigned)arg(c,0));
             c.gpr[2]=1;
             break;
@@ -1509,9 +1572,13 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
      */
     if(pending & IrqController::VBlank)
     {
-        keep &= static_cast<uint16_t>(
-            ~IrqController::VBlank
-        );
+        const bool padCardHandlerActive=m_padEnabled || m_cardStarted;
+        const bool autoAckVblank=m_autoAck[3] || (padCardHandlerActive && m_clearPad);
+        if(autoAckVblank){
+            keep &= static_cast<uint16_t>(
+                ~IrqController::VBlank
+            );
+        }
     }
 
     if(
@@ -1588,7 +1655,7 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
      * legivel pelo FIRST/SECOND. O estado pos-RFE ja foi calculado em
      * resumeState e sera restaurado quando a cadeia terminar.
      */
-    if(!haveIntRp){
+    if(!haveIntRp && m_entryIntHook==0){
         const uint32_t low = c.cop0[12] & 0x3Fu;
         c.cop0[12] =
             (c.cop0[12] & ~0x3Fu) |
@@ -1634,6 +1701,8 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
         tracePrintf("[BIOS IRQ CHAIN DISPATCH] pending=%04X\n",(unsigned)pending);
     } else if(irqCallback){
         beginEventCallback(c,resumeState,irqCallback);
+    } else if(m_entryIntHook!=0){
+        beginEntryIntHook(c,resumeState);
     }
 
     return true;
