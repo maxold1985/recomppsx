@@ -36,6 +36,13 @@ public:
     void setAudioSink(AudioSink sink) { m_audioSink = std::move(sink); }
     uint32_t readDataWord();
     std::size_t dataBytesAvailable() const { return m_data.size(); }
+    std::size_t responseBytesAvailable() const { return m_response.size(); }
+
+    // BIOS/HLE-visible decoder IRQ state. These expose the same state as
+    // HINTMSK/HINTSTS without changing the selected register bank.
+    uint8_t irqEnable() const { return m_irqEnable; }
+    uint8_t irqFlags() const { return m_irqFlags; }
+    void acknowledgeInterrupt(uint8_t value);
 
     // HLE helpers use logical 2048-byte sectors (LBA 0 == ISO sector 0).
     bool readUserSector(uint32_t lba, uint8_t* dst2048);
