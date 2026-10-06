@@ -280,6 +280,22 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
             c.gpr[2]=1;
             break;
         }
+        case 0x56: // _96_remove (alias)
+        case 0x72: { // _96_remove
+            m_cdrom.write8(0x1F801800u, 0x01u);
+            m_cdrom.write8(0x1F801802u, 0x00u);
+            m_cdrom.write8(0x1F801803u, 0x1Fu);
+            m_cdrom.write8(0x1F801800u, 0x00u);
+            tracePrintf("[BIOS CD REMOVE] _96_remove HINTMSK=00\n");
+            c.gpr[2]=1;
+            break;
+        }
+        case 0x95: { // CdInitSubFunc
+            initializeCdrom();
+            tracePrintf("[BIOS CD INIT SUB] CdInitSubFunc\n");
+            c.gpr[2]=1;
+            break;
+        }
         case 0xA5: { // CdReadSector(count, sector, buffer)
             const uint32_t count=arg(c,0),sector=arg(c,1),dst=arg(c,2);
             std::vector<uint8_t> buf(std::size_t(count)*2048u);
@@ -354,6 +370,15 @@ bool BiosHle::handleVector(r3k::CpuState& c)
     if(p==(kEventCallbackTrampoline&0x1FFFFFFFu) && m_eventCallbackActive) return finishEventCallback(c);
     if(p!=0xA0u&&p!=0xB0u&&p!=0xC0u)return false;
     const uint8_t fn=uint8_t(c.gpr[9]);
+    if(p==0xA0u &&
+       (fn==0x54u || fn==0x56u || fn==0x71u || fn==0x72u ||
+        fn==0x78u || fn==0x7Cu || fn==0x7Eu || fn==0x81u ||
+        (fn>=0x90u && fn<=0x95u) || fn==0x9Eu ||
+        (fn>=0xA2u && fn<=0xA6u))){
+        tracePrintf("[BIOS CD CALL] fn=%02X a0=%08X a1=%08X a2=%08X a3=%08X\n",
+            (unsigned)fn,(unsigned)c.gpr[4],(unsigned)c.gpr[5],
+            (unsigned)c.gpr[6],(unsigned)c.gpr[7]);
+    }
     if(p==0xA0u)callA(c,fn);else if(p==0xB0u)callB(c,fn);else callC(c,fn);
     // ReturnFromException (B17) chooses EPC itself; normal BIOS vectors return to RA.
     if(!(p==0xB0u && fn==0x17u)) c.pc=c.gpr[31];
