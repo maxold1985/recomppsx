@@ -44,6 +44,7 @@ private:
     bool startInterruptChain(r3k::CpuState& cpu, const r3k::CpuState& resumeState);
     bool continueInterruptChain(r3k::CpuState& cpu);
     bool serviceCdromInterrupt(uint32_t& callback);
+    bool serviceRetailCdromIntRp(uint32_t& callback);
 
     void callA(r3k::CpuState& cpu, uint8_t fn);
     void callB(r3k::CpuState& cpu, uint8_t fn);
