@@ -1158,7 +1158,12 @@ void BiosHle::callB(r3k::CpuState& c,uint8_t fn)
         case 0x03: {const uint32_t t=arg(c,0);c.gpr[2]=t<3?m_mem.read16(0x1F801100u+t*0x10u):0;break;}
         case 0x04: case 0x05: {const uint32_t t=arg(c,0);uint16_t mask=m_irq.mask();uint16_t bit=t<3?uint16_t(1u<<(4u+t)):(t==3?1u:0u);if(fn==0x04)mask|=bit;else mask&=~bit;m_irq.setMask(mask);c.gpr[2]=(fn==0x05||t<3)?1u:0u;break;}
         case 0x06: {const uint32_t t=arg(c,0);if(t<3){m_mem.write16(0x1F801100u+t*0x10u,0);c.gpr[2]=1;}else c.gpr[2]=0;break;}
-        case 0x07: deliverEvent(arg(c,0),arg(c,1)); c.gpr[2]=1; break;
+        case 0x07: { // DeliverEvent
+            const uint32_t cb=deliverEvent(arg(c,0),arg(c,1));
+            if(cb && m_pendingEventCallback==0) m_pendingEventCallback=cb;
+            c.gpr[2]=1;
+            break;
+        }
         case 0x08: c.gpr[2]=openEvent(arg(c,0),arg(c,1),arg(c,2),arg(c,3)); break;
         case 0x09: if(auto*e=eventFromHandle(arg(c,0)))*e=Event(); c.gpr[2]=1; break;
         case 0x0A: {auto*e=eventFromHandle(arg(c,0));c.gpr[2]=(e&&e->enabled&&e->ready)?1u:0u;if(c.gpr[2])e->ready=false;break;}
@@ -1262,9 +1267,26 @@ bool BiosHle::handleVector(r3k::CpuState& c)
             (unsigned)fn,(unsigned)c.gpr[4],(unsigned)c.gpr[5],
             (unsigned)c.gpr[6],(unsigned)c.gpr[7]);
     }
+    m_threadSwitchPerformed=false;
     if(p==0xA0u)callA(c,fn);else if(p==0xB0u)callB(c,fn);else callC(c,fn);
-    // ReturnFromException (B17) chooses EPC itself; normal BIOS vectors return to RA.
-    if(!(p==0xB0u && fn==0x17u)) c.pc=c.gpr[31];
+
+    // ReturnFromException chooses EPC itself. ChangeTh has already replaced the
+    // complete CPU context, so overwriting PC with the old caller RA here would
+    // immediately undo the thread switch.
+    if(p==0xB0u && fn==0x17u) return true;
+    if(p==0xB0u && fn==0x10u && m_threadSwitchPerformed) return true;
+
+    c.pc=c.gpr[31];
+
+    // Mode-1000 BIOS events execute guest callbacks before returning to the
+    // caller. Card HLE completes I/O synchronously, therefore defer the callback
+    // until the BIOS vector has established the normal resume PC.
+    if(m_pendingEventCallback!=0 && !m_eventCallbackActive){
+        const uint32_t callback=m_pendingEventCallback;
+        m_pendingEventCallback=0;
+        const r3k::CpuState resume=c;
+        beginEventCallback(c,resume,callback);
+    }
     return true;
 }
 
