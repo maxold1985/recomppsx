@@ -38,6 +38,9 @@ private:
     bool finishEventCallback(r3k::CpuState& cpu);
     uint32_t openEvent(uint32_t cls, uint32_t spec, uint32_t mode, uint32_t func);
     Event* eventFromHandle(uint32_t handle);
+    bool enqueueIntRp(uint32_t priority, uint32_t struc);
+    bool dequeueIntRp(uint32_t priority, uint32_t struc);
+    uint32_t firstInterruptRoutine() const;
 
     void callA(r3k::CpuState& cpu, uint8_t fn);
     void callB(r3k::CpuState& cpu, uint8_t fn);
@@ -51,6 +54,7 @@ private:
     psxgpu::PsxGpu& m_gpu;
     std::array<Event, 32> m_events;
     std::array<bool, 4> m_autoAck;
+    std::array<uint32_t, 4> m_intRpHeads;
     uint32_t m_padBuf1=0, m_padBuf2=0, m_padButtonDest=0;
     uint32_t m_padSize1=0, m_padSize2=0;
     bool m_padEnabled=false;
