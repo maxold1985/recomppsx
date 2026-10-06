@@ -36,6 +36,62 @@ static bool isBiosCallVector(uint32_t pc)
     return p==0x000000A0u || p==0x000000B0u || p==0x000000C0u;
 }
 
+static uint32_t biosPhysPtr(uint32_t p)
+{
+    return p&0x1FFFFFFFu;
+}
+
+static bool biosKernelTablesReady(PsxMemory& mem)
+{
+    // BIOS "Table of Tables":
+    // 100h ExCB, 108h PCB, 110h TCB, 120h EvCB. Each entry is {base,size}.
+    const uint32_t excbBase=mem.rawRead32(0x00000100u);
+    const uint32_t excbSize=mem.rawRead32(0x00000104u);
+    const uint32_t pcbBase =mem.rawRead32(0x00000108u);
+    const uint32_t pcbSize =mem.rawRead32(0x0000010Cu);
+    const uint32_t tcbBase =mem.rawRead32(0x00000110u);
+    const uint32_t tcbSize =mem.rawRead32(0x00000114u);
+    const uint32_t evBase  =mem.rawRead32(0x00000120u);
+    const uint32_t evSize  =mem.rawRead32(0x00000124u);
+
+    if(!excbBase || excbSize<0x20u || !pcbBase || pcbSize<4u ||
+       !tcbBase || tcbSize<0xC0u || !evBase || evSize<0x1Cu)
+        return false;
+
+    const uint32_t excbPhys=biosPhysPtr(excbBase);
+    const uint32_t pcbPhys =biosPhysPtr(pcbBase);
+    const uint32_t tcbPhys =biosPhysPtr(tcbBase);
+    const uint32_t evPhys  =biosPhysPtr(evBase);
+
+    // Kernel control blocks are allocated from the BIOS kernel-memory region.
+    if(excbPhys<0x0000E000u || excbPhys>=0x00010000u ||
+       pcbPhys <0x0000E000u || pcbPhys >=0x00010000u ||
+       tcbPhys <0x0000E000u || tcbPhys >=0x00010000u ||
+       evPhys  <0x0000E000u || evPhys  >=0x00010000u)
+        return false;
+
+    // PCB[0] points at the current TCB. A usable exception/syscall return path
+    // needs a valid current TCB marked as used (4000h).
+    const uint32_t currentTcb=mem.rawRead32(pcbPhys);
+    const uint32_t currentTcbPhys=biosPhysPtr(currentTcb);
+    if(!currentTcb ||
+       currentTcbPhys<tcbPhys ||
+       currentTcbPhys>=tcbPhys+tcbSize)
+        return false;
+
+    if(mem.rawRead32(currentTcbPhys)!=0x00004000u)
+        return false;
+
+    // ExCB priority 0 must already contain the syscall exception-chain node.
+    // Without it, ExcCode=8 reaches the generic exception loop but never
+    // returns to the caller.
+    const uint32_t syscallChain=mem.rawRead32(excbPhys+0x00u);
+    if(syscallChain==0u)
+        return false;
+
+    return true;
+}
+
 static uint32_t biosLwl(PsxMemory& mem,uint32_t a,uint32_t rt)
 {
     const uint32_t w=mem.read32(a&~3u);
@@ -340,10 +396,11 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
         const uint32_t vc=m_memory.rawRead32(0x000000C0u);
         const uint32_t exc=m_memory.rawRead32(0x00000080u);
         const uint32_t a0entry=m_memory.rawRead32(0x00000200u);
-        // Native BIOS calls need both the A0/B0/C0 trampolines and the general
-        // exception vector. SYSCALL enters 0x80000080, so stopping earlier would
-        // execute uninitialized low RAM.
-        if(va!=0 && vb!=0 && vc!=0 && exc!=0 && a0entry!=0){
+
+        // Do not stop merely when vectors appear. The exception handler also
+        // requires the kernel control blocks and priority-0 syscall chain.
+        if(va!=0 && vb!=0 && vc!=0 && exc!=0 && a0entry!=0 &&
+           biosKernelTablesReady(m_memory)){
             ready=true;
             break;
         }
@@ -357,13 +414,21 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
     m_cpu=savedCpu;
 
     if(ready){
-        tracePrintf("[OPENBIOS BOOTSTRAP] vectors ready steps=%u A0=%08X B0=%08X C0=%08X EXC80=%08X A0[0]=%08X\n",
+        const uint32_t excb=m_memory.rawRead32(0x00000100u);
+        const uint32_t pcb=m_memory.rawRead32(0x00000108u);
+        const uint32_t tcb=m_memory.rawRead32(0x00000110u);
+        const uint32_t ev =m_memory.rawRead32(0x00000120u);
+        const uint32_t cur=m_memory.rawRead32(biosPhysPtr(pcb));
+
+        tracePrintf("[OPENBIOS BOOTSTRAP] kernel ready steps=%u A0=%08X B0=%08X C0=%08X EXC80=%08X A0[0]=%08X ExCB=%08X PCB=%08X TCB=%08X EvCB=%08X CurTCB=%08X\n",
                     steps,
                     (unsigned)m_memory.rawRead32(0x000000A0u),
                     (unsigned)m_memory.rawRead32(0x000000B0u),
                     (unsigned)m_memory.rawRead32(0x000000C0u),
                     (unsigned)m_memory.rawRead32(0x00000080u),
-                    (unsigned)m_memory.rawRead32(0x00000200u));
+                    (unsigned)m_memory.rawRead32(0x00000200u),
+                    (unsigned)excb,(unsigned)pcb,(unsigned)tcb,
+                    (unsigned)ev,(unsigned)cur);
         return true;
     }
 
