@@ -320,14 +320,18 @@ void PsxRuntime::loadExecutable(const PsxExeImage& image)
     tracePrintf("[RUNTIME] loadExecutable entry=%08X load=%08X size=%u\n", image.initial_pc, image.load_address, (unsigned)image.payload.size());
     reset();
 
-    // Direct PS-X EXE loading skips the BIOS boot. With OpenBIOS selected,
-    // execute only its early boot until the low-RAM A0/B0/C0 vectors and A0
-    // table are installed. The existing recomppsx HLE remains initialized as
-    // a fallback for calls the OpenBIOS interpreter cannot complete yet.
+    // Direct PS-X EXE loading skips the BIOS boot. When a mapped BIOS can
+    // bootstrap a usable kernel, keep its native kernel/CD state intact.
+    // Only the pure-HLE path (or a failed BIOS bootstrap) synthesizes _96_init.
+    bool nativeKernel=false;
     if(m_biosBackend==BiosBackendOpenBios && m_memory.hasBiosRom())
-        bootstrapOpenBiosKernel();
+        nativeKernel=bootstrapOpenBiosKernel();
 
-    m_bios.initializeCdrom();
+    if(!nativeKernel){
+        m_bios.initializeCdrom();
+    } else {
+        tracePrintf("[RUNTIME] native BIOS kernel ready; preserving native CD/IRQ state (HLE _96_init skipped)\n");
+    }
     if (!image.payload.empty())
         m_memory.loadBytes(image.load_address, image.payload.data(), image.payload.size());
 
