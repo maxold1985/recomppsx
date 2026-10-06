@@ -18,6 +18,7 @@ void BiosHle::reset()
     m_autoAck.fill(true);
     m_intRpHeads.fill(0);
     m_padBuf1=m_padBuf2=m_padButtonDest=0; m_padSize1=m_padSize2=0; m_padEnabled=false; m_clearPad=true;
+    m_cdBiosIrqInstalled=false; m_cdLastStatus=0; m_cdLastError=0;
     m_eventCallbackActive=false; m_eventCallbackFunc=0; m_eventResumeState=r3k::CpuState();
     m_irqChainActive=false; m_irqResumeState=r3k::CpuState();
     m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
@@ -26,6 +27,8 @@ void BiosHle::reset()
 
 void BiosHle::initializeCdrom()
 {
+    m_cdBiosIrqInstalled=true;
+
     // Loading a PS-X EXE directly skips the retail BIOS boot path. The BIOS
     // normally calls _96_init() before transferring control to the executable,
     // so reproduce the externally visible CD decoder setup here.
@@ -34,6 +37,73 @@ void BiosHle::initializeCdrom()
     m_cdrom.write8(0x1F801803u, 0x1Fu); // clear stale HINTSTS low bits
     m_cdrom.write8(0x1F801800u, 0x00u); // bank 0
     tracePrintf("[BIOS CD INIT] post-boot _96_init HINTMSK=1F\n");
+}
+
+bool BiosHle::serviceCdromInterrupt(uint32_t& callback)
+{
+    const uint16_t pending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
+
+    if(!m_cdBiosIrqInstalled || (pending & IrqController::Cdrom)==0)
+        return false;
+
+    // A game that explicitly installs a priority-0 SysIntRP entry owns the
+    // CD-ROM interrupt path. Do not steal the interrupt from that guest ISR.
+    if(m_intRpHeads[0]!=0){
+        tracePrintf("[BIOS CD IRQ] guest priority0 handler present; defer to SysIntRP\n");
+        return false;
+    }
+
+    const uint8_t flags=m_cdrom.irqFlags();
+    const uint8_t type=static_cast<uint8_t>(flags & 0x07u);
+    uint8_t response0=0;
+    uint8_t response1=0;
+
+    if(m_cdrom.responseBytesAvailable()!=0)
+        response0=m_cdrom.read8(0x1F801801u);
+    if(m_cdrom.responseBytesAvailable()!=0)
+        response1=m_cdrom.read8(0x1F801801u);
+
+    if(response0!=0)
+        m_cdLastStatus=response0;
+    if(type==5u)
+        m_cdLastError=response1;
+
+    // The BIOS owns a normal IRQ2 event plus CD-specific completion events.
+    // INT3 is the acknowledgement used by commands such as GetStat, and
+    // INT2 is the later completion used by multi-phase commands.
+    uint32_t eventSpec=0;
+    switch(type){
+        case 2:
+        case 3: eventSpec=0x20u; break;
+        case 4: eventSpec=0x80u; break;
+        case 5: eventSpec=0x8000u; break;
+        default: break; // INT1 is sector-ready and is handled by the data path.
+    }
+
+    {
+        const uint32_t cb=deliverEvent(0xF0000003u,0x1000u);
+        if(!callback) callback=cb;
+    }
+    if(eventSpec){
+        const uint32_t cb=deliverEvent(0xF0000003u,eventSpec);
+        if(!callback) callback=cb;
+    }
+
+    // BIOS priority-0 CD ISR consumes the decoder interrupt before lower
+    // priority Card/PAD SysIntRP entries are considered.
+    m_cdrom.acknowledgeInterrupt(0x1Fu);
+    m_irq.acknowledge(static_cast<uint16_t>(0x07FFu & ~IrqController::Cdrom));
+
+    tracePrintf(
+        "[BIOS CD IRQ] type=%u flags=%02X status=%02X error=%02X spec=%04X handled=1\n",
+        static_cast<unsigned>(type),
+        static_cast<unsigned>(flags),
+        static_cast<unsigned>(m_cdLastStatus),
+        static_cast<unsigned>(m_cdLastError),
+        static_cast<unsigned>(eventSpec)
+    );
+
+    return true;
 }
 
 uint32_t BiosHle::arg(const r3k::CpuState& cpu,unsigned index) const
@@ -282,11 +352,38 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
         }
         case 0x56: // _96_remove (alias)
         case 0x72: { // _96_remove
+            m_cdBiosIrqInstalled=false;
             m_cdrom.write8(0x1F801800u, 0x01u);
             m_cdrom.write8(0x1F801802u, 0x00u);
             m_cdrom.write8(0x1F801803u, 0x1Fu);
             m_cdrom.write8(0x1F801800u, 0x00u);
             tracePrintf("[BIOS CD REMOVE] _96_remove HINTMSK=00\n");
+            c.gpr[2]=1;
+            break;
+        }
+        case 0x90: { // CdromIoIrqFunc1 (FIRST)
+            c.gpr[2]=(m_cdBiosIrqInstalled &&
+                      ((m_irq.stat() & m_irq.mask() & IrqController::Cdrom)!=0)) ? 1u : 0u;
+            break;
+        }
+        case 0x91: { // CdromDmaIrqFunc1 (FIRST)
+            c.gpr[2]=((m_irq.stat() & m_irq.mask() & IrqController::Dma)!=0) ? 1u : 0u;
+            break;
+        }
+        case 0x92: { // CdromIoIrqFunc2 (SECOND)
+            uint32_t ignoredCallback=0;
+            c.gpr[2]=serviceCdromInterrupt(ignoredCallback) ? 1u : 0u;
+            break;
+        }
+        case 0x93: { // CdromDmaIrqFunc2 (SECOND)
+            // DMA-specific DICR acknowledgement belongs to the DMA controller;
+            // keep this HLE conservative and only report whether IRQ3 is live.
+            c.gpr[2]=((m_irq.stat() & m_irq.mask() & IrqController::Dma)!=0) ? 1u : 0u;
+            break;
+        }
+        case 0x94: { // CdromGetInt5errCode(dst1,dst2)
+            if(arg(c,0)) m_mem.write8(arg(c,0),m_cdLastStatus);
+            if(arg(c,1)) m_mem.write8(arg(c,1),m_cdLastError);
             c.gpr[2]=1;
             break;
         }
@@ -296,12 +393,32 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
             c.gpr[2]=1;
             break;
         }
+        case 0x9E: { // SetCdromIrqAutoAbort(type,flag)
+            // The current HLE completes decoder IRQs synchronously; retain API
+            // compatibility and log the requested policy.
+            tracePrintf("[BIOS CD AUTOABORT] type=%08X flag=%08X\n",
+                        (unsigned)arg(c,0),(unsigned)arg(c,1));
+            c.gpr[2]=1;
+            break;
+        }
+        case 0xA2: { // EnqueueCdIntr -- BIOS priority 0
+            m_cdBiosIrqInstalled=true;
+            tracePrintf("[BIOS CD ENQUEUE] priority=0 installed=1\n");
+            c.gpr[2]=1;
+            break;
+        }
+        case 0xA3: { // DequeueCdIntr
+            m_cdBiosIrqInstalled=false;
+            tracePrintf("[BIOS CD DEQUEUE] priority=0 installed=0\n");
+            c.gpr[2]=1;
+            break;
+        }
         case 0xA5: { // CdReadSector(count, sector, buffer)
             const uint32_t count=arg(c,0),sector=arg(c,1),dst=arg(c,2);
             std::vector<uint8_t> buf(std::size_t(count)*2048u);
             const bool ok=m_cdrom.readUserSectors(sector,count,buf.data());
             if(ok)for(std::size_t i=0;i<buf.size();++i)m_mem.write8(dst+uint32_t(i),buf[i]);
-            c.gpr[2]=ok?1u:0u; break;
+            c.gpr[2]=ok?count:0xFFFFFFFFu; break;
         }
         case 0xA6: c.gpr[2]=m_cdrom.statusByte(); break;
         case 0x78: c.gpr[2]=1; break; // CdAsyncSeekL accepted; low-level CD controller handles actual seeks.
@@ -395,7 +512,7 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
     if(p != 0x80u && p != 0x180u)
         return false;
 
-    const uint16_t pending =
+    uint16_t pending =
         m_irq.stat() & m_irq.mask();
 
     // Preserve the guest context that must be restored after an IRQ callback.
@@ -420,6 +537,14 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
     );
 
     std::fflush(stdout);
+
+    // The retail BIOS CD handler is a priority-0 SysIntRP entry. Service it
+    // before guest Card/PAD chains (typically priorities 1/2), then recompute
+    // pending sources so an already-consumed CD IRQ is not misrouted.
+    if(pending & IrqController::Cdrom){
+        serviceCdromInterrupt(irqCallback);
+        pending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
+    }
 
     /*
      * TESTE TEMPORARIO DE VBLANK
