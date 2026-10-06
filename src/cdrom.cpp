@@ -13,6 +13,10 @@ namespace psxrecomp {
 namespace {
 const uint32_t kCdBase = 0x1F801800u;
 const uint32_t kCpuCyclesPerSector = 33868800u / 75u;
+// Coarse controller timing for the delayed completion phase of Init (0Ah).
+// Real hardware reports INT3 first and INT2 later; one sector period keeps the
+// response asynchronous without tying BIOS behavior to host wall-clock time.
+const uint32_t kInitSecondResponseCycles = kCpuCyclesPerSector;
 }
 
 void PsxCdrom::reset()
@@ -29,6 +33,10 @@ void PsxCdrom::reset()
     m_reading = false;
     m_playing = false;
     m_cycleAccumulator = 0;
+    m_secondResponseActive = false;
+    m_secondResponseCommand = 0;
+    m_secondResponseIrq = 0;
+    m_secondResponseCycles = 0;
     m_xaHist1[0]=m_xaHist1[1]=m_xaHist2[0]=m_xaHist2[1]=0;
     m_xaResamplePhase=0;
     m_params.clear();
@@ -224,6 +232,54 @@ void PsxCdrom::raiseCdInterrupt(uint8_t type)
     // enabled HINTSTS bit is active.
     if(enabled)
         m_irq.request(IrqController::Cdrom);
+}
+
+void PsxCdrom::scheduleSecondResponse(uint8_t command, uint8_t irqType, uint32_t delayCycles)
+{
+    m_secondResponseActive = true;
+    m_secondResponseCommand = command;
+    m_secondResponseIrq = irqType;
+    m_secondResponseCycles = delayCycles;
+
+    tracePrintf(
+        "[CD SECOND SCHEDULE] cmd=%02X irq=%u delay=%u\n",
+        static_cast<unsigned>(command),
+        static_cast<unsigned>(irqType),
+        static_cast<unsigned>(delayCycles)
+    );
+}
+
+void PsxCdrom::tickSecondResponse(uint32_t cpuCycles)
+{
+    if(!m_secondResponseActive)
+        return;
+
+    if(m_secondResponseCycles > cpuCycles)
+        m_secondResponseCycles -= cpuCycles;
+    else
+        m_secondResponseCycles = 0;
+
+    // HINTSTS can hold only one current response. If the first phase hasn't
+    // been acknowledged yet, keep the delayed phase queued until it is clear.
+    if(m_secondResponseCycles != 0 || m_irqFlags != 0)
+        return;
+
+    const uint8_t command = m_secondResponseCommand;
+    const uint8_t irqType = m_secondResponseIrq;
+    m_secondResponseActive = false;
+    m_secondResponseCommand = 0;
+    m_secondResponseIrq = 0;
+
+    m_response.clear();
+    queueResponse(statusByte());
+
+    tracePrintf(
+        "[CD SECOND FIRE] cmd=%02X irq=%u status=%02X\n",
+        static_cast<unsigned>(command),
+        static_cast<unsigned>(irqType),
+        static_cast<unsigned>(statusByte())
+    );
+    raiseCdInterrupt(irqType);
 }
 
 bool PsxCdrom::readDirectorySector(uint32_t lba, uint8_t* dst2048)
@@ -449,6 +505,15 @@ void PsxCdrom::executeCommand(uint8_t cmd)
         std::fflush(stdout);
         ++commandLog;
     }
+
+    // PS1 hardware silently drops a second Init command while the delayed INT2
+    // of a previous Init is still pending.
+    if(cmd==0x0Au && m_secondResponseActive && m_secondResponseCommand==0x0Au){
+        tracePrintf("[CD COMMAND DROP] cmd=0A reason=init-second-response-pending\n");
+        m_params.clear();
+        return;
+    }
+
     m_response.clear();
     switch (cmd) {
         case 0x01: // Nop / GetStat
@@ -496,12 +561,14 @@ void PsxCdrom::executeCommand(uint8_t cmd)
             queueResponse(statusByte());
             raiseCdInterrupt(3);
             break;
-        case 0x0A: // Init
+        case 0x0A: // Init: INT3 first, delayed INT2 completion
             m_reading = false;
             m_playing = false;
             m_mode = 0x20;
+            m_data.clear();
             queueResponse(statusByte());
             raiseCdInterrupt(3);
+            scheduleSecondResponse(0x0Au, 2u, kInitSecondResponseCycles);
             break;
         case 0x0D: // Setfilter
             if (!m_params.empty()) { m_filterFile = m_params.front(); m_params.pop_front(); }
@@ -676,6 +743,10 @@ uint32_t PsxCdrom::readDataWord()
 
 void PsxCdrom::tick(uint32_t cpuCycles)
 {
+    // Command completion timing exists even when no disc image has been mounted
+    // yet (BIOS _96_init runs before the direct EXE mounts its image).
+    tickSecondResponse(cpuCycles);
+
     if ((!m_reading && !m_playing) || !mounted()) return;
     m_cycleAccumulator += cpuCycles;
     const uint32_t period = (m_mode & 0x80u) ? (kCpuCyclesPerSector / 2u) : kCpuCyclesPerSector;
