@@ -50,7 +50,9 @@ enum EmulationRunState {
     EmulationStopped
 };
 
-volatile EmulationRunState g_emulationState = EmulationRunning;
+volatile EmulationRunState g_emulationState = EmulationStopped;
+volatile bool g_emulationStarted = false;
+volatile bool g_restartGuest = false;
 
 struct LogControls {
     HWND button;
@@ -97,6 +99,9 @@ LRESULT CALLBACK log_panel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         if(id==IDC_EMU_START && HIWORD(wp)==BN_CLICKED){
+            if(g_emulationState==EmulationStopped && g_emulationStarted)
+                g_restartGuest=true;
+            g_emulationStarted=true;
             g_emulationState=EmulationRunning;
             return 0;
         }
@@ -106,6 +111,8 @@ LRESULT CALLBACK log_panel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         if(id==IDC_EMU_STOP && HIWORD(wp)==BN_CLICKED){
+            if(g_emulationStarted)
+                g_restartGuest=true;
             g_emulationState=EmulationStopped;
             return 0;
         }
@@ -388,14 +395,14 @@ int main(int argc, char** argv)
             const bool down = glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
             const bool left = glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS;
             const bool right = glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
-            if(g_emulationState==EmulationStopped){
+            if(g_restartGuest && g_emulationState==EmulationRunning){
                 log_line("[CONTROL] Start after Stop: restarting guest\n");
                 runtime->loadExecutable(image);
                 if(argc>=3) runtime->mountDisc(argv[2]);
                 g_guestPc=runtime->cpu().pc;
                 g_guestCycles=runtime->cpu().cycles;
                 warnedStall=false;
-                g_emulationState=EmulationPaused;
+                g_restartGuest=false;
             }
 
             psxrecomp::PsxPadSio& pad = runtime->pad();
