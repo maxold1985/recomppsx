@@ -39,6 +39,7 @@ public:
     void advance(uint32_t cpuCycles);
     bool handleHle();
     bool stepOpenBios();
+    bool bootstrapOpenBiosKernel();
 
     r3k::CpuState& cpu() { return m_cpu; }
     PsxMemory& memory() { return m_memory; }
@@ -65,6 +66,11 @@ private:
     BiosHle m_bios;
     r3k::CpuState m_cpu;
     BiosBackend m_biosBackend = BiosBackendHle;
+    bool m_openBiosKernelReady = false;
+    bool m_openBiosBootstrapActive = false;
+    bool m_openBiosCallActive = false;
+    uint32_t m_openBiosVectorPc = 0;
+    r3k::CpuState m_openBiosFallbackCpu;
 
     uint64_t m_scanlineCycles = 0;
     uint64_t m_dotClockNumerator = 0;
