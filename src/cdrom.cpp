@@ -13,10 +13,12 @@ namespace psxrecomp {
 namespace {
 const uint32_t kCdBase = 0x1F801800u;
 const uint32_t kCpuCyclesPerSector = 33868800u / 75u;
-// Coarse controller timing for the delayed completion phase of Init (0Ah).
-// Real hardware reports INT3 first and INT2 later; one sector period keeps the
-// response asynchronous without tying BIOS behavior to host wall-clock time.
+// Coarse controller timing for commands with a two-phase response.
+// Init, Stop/Pause and Seek report INT3 first and INT2 later. Keeping the
+// completion asynchronous is important for the native BIOS event path.
 const uint32_t kInitSecondResponseCycles = kCpuCyclesPerSector;
+const uint32_t kControlSecondResponseCycles = kCpuCyclesPerSector;
+const uint32_t kSeekSecondResponseCycles = kCpuCyclesPerSector;
 }
 
 void PsxCdrom::reset()
@@ -595,12 +597,13 @@ void PsxCdrom::executeCommand(uint8_t cmd)
             queueResponse(statusByte());
             raiseCdInterrupt(3);
             break;
-        case 0x08: // Stop
-        case 0x09: // Pause
+        case 0x08: // Stop: INT3 first, INT2 completion
+        case 0x09: // Pause: INT3 first, INT2 completion
             m_reading = false;
             m_playing = false;
             queueResponse(statusByte());
             raiseCdInterrupt(3);
+            scheduleSecondResponse(cmd, 2u, kControlSecondResponseCycles);
             break;
         case 0x0A: // Init: INT3 first, delayed INT2 completion
             m_reading = false;
@@ -642,11 +645,12 @@ void PsxCdrom::executeCommand(uint8_t cmd)
             queueResponse(toBcd(2));
             raiseCdInterrupt(3);
             break;
-        case 0x15: // SeekL
-        case 0x16: // SeekP
+        case 0x15: // SeekL: INT3 first, INT2 when seek completes
+        case 0x16: // SeekP: INT3 first, INT2 when seek completes
             m_currentLba = m_setlocLba;
             queueResponse(statusByte());
             raiseCdInterrupt(3);
+            scheduleSecondResponse(cmd, 2u, kSeekSecondResponseCycles);
             break;
         case 0x1A: // GetID -- licensed data disc response
             queueResponse(statusByte());
