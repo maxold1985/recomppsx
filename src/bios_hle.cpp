@@ -3,6 +3,7 @@
 #include "psxgpu/psx_gpu_mmio.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -18,6 +19,25 @@ void BiosHle::reset()
     m_autoAck.fill(true);
     m_intRpHeads.fill(0);
     m_padBuf1=m_padBuf2=m_padButtonDest=0; m_padSize1=m_padSize2=0; m_padEnabled=false; m_clearPad=true;
+
+    m_randSeed=1;
+    m_heapBase=0;
+    m_heapSize=0;
+    m_threads.fill(Thread());
+    m_threads[0].used=true;
+    m_currentThread=0;
+    m_threadSwitchPerformed=false;
+
+    m_files.fill(FileHandle());
+    m_find=FindState();
+    m_cardStatus[0]=m_cardStatus[1]=1;
+    m_cardIgnoreChange[0]=m_cardIgnoreChange[1]=false;
+    m_cardInitialized=false;
+    m_cardStarted=false;
+    m_pendingEventCallback=0;
+    formatCard(0);
+    formatCard(1);
+
     m_cdBiosIrqInstalled=false; m_cdLastStatus=0; m_cdLastError=0;
     m_cdAsyncReadActive=false; m_cdAsyncReadRemaining=0; m_cdAsyncReadDst=0; m_cdAsyncReadMode=0;
     m_eventCallbackActive=false; m_eventCallbackFunc=0; m_eventResumeState=r3k::CpuState();
@@ -239,6 +259,421 @@ void BiosHle::writeBytes(uint32_t dst,uint32_t src,uint32_t len)
     else if(dst>src){for(uint32_t i=len;i>0;--i)m_mem.write8(dst+i-1,m_mem.read8(src+i-1));}
 }
 void BiosHle::fillBytes(uint32_t dst,uint8_t value,uint32_t len){if(dst==0||len>0x7FFFFFFFu)return;for(uint32_t i=0;i<len;++i)m_mem.write8(dst+i,value);}
+
+int BiosHle::threadIndex(uint32_t handle) const
+{
+    if(handle<0xFF000000u || handle>=0xFF000004u) return -1;
+    return static_cast<int>(handle-0xFF000000u);
+}
+
+uint32_t BiosHle::openThread(r3k::CpuState& cpu,uint32_t pc,uint32_t sp,uint32_t gp)
+{
+    for(unsigned i=1;i<m_threads.size();++i){
+        if(m_threads[i].used) continue;
+        Thread t;
+        t.used=true;
+        t.cpu.pc=pc;
+        t.cpu.gpr[28]=gp;
+        t.cpu.gpr[29]=sp;
+        t.cpu.gpr[30]=sp;
+        t.cpu.gpr[31]=0;
+        t.cpu.cop0[12]=cpu.cop0[12];
+        t.cpu.cop0[15]=cpu.cop0[15];
+        m_threads[i]=t;
+        tracePrintf("[BIOS THREAD OPEN] id=%u handle=%08X pc=%08X sp=%08X gp=%08X\n",
+                    i,0xFF000000u+i,(unsigned)pc,(unsigned)sp,(unsigned)gp);
+        return 0xFF000000u+i;
+    }
+    return 0xFFFFFFFFu;
+}
+
+uint32_t BiosHle::closeThread(uint32_t handle)
+{
+    const int idx=threadIndex(handle);
+    if(idx>0 && static_cast<unsigned>(idx)!=m_currentThread)
+        m_threads[static_cast<unsigned>(idx)]=Thread();
+    tracePrintf("[BIOS THREAD CLOSE] handle=%08X idx=%d\n",(unsigned)handle,idx);
+    return 1;
+}
+
+uint32_t BiosHle::changeThread(r3k::CpuState& cpu,uint32_t handle)
+{
+    const int idx=threadIndex(handle);
+    m_threadSwitchPerformed=false;
+    if(idx<0 || !m_threads[static_cast<unsigned>(idx)].used) return 0;
+    if(static_cast<unsigned>(idx)==m_currentThread) return 1;
+
+    const uint64_t cycles=cpu.cycles;
+    Thread& old=m_threads[m_currentThread];
+    old.used=true;
+    old.cpu=cpu;
+    old.cpu.pc=cpu.gpr[31];
+    old.cpu.gpr[2]=1;
+
+    cpu=m_threads[static_cast<unsigned>(idx)].cpu;
+    cpu.cycles=cycles;
+    m_currentThread=static_cast<unsigned>(idx);
+    m_threadSwitchPerformed=true;
+
+    tracePrintf("[BIOS THREAD SWITCH] new=%u pc=%08X sp=%08X\n",
+                m_currentThread,(unsigned)cpu.pc,(unsigned)cpu.gpr[29]);
+    return 1;
+}
+
+bool BiosHle::wildcardMatch(const std::string& pattern,const std::string& value)
+{
+    std::size_t p=0,v=0;
+    while(p<pattern.size()){
+        const char pc=pattern[p];
+        if(pc=='*') return true;
+        if(v>=value.size()) return false;
+        if(pc!='?' && pc!=value[v]) return false;
+        ++p; ++v;
+    }
+    return v==value.size();
+}
+
+bool BiosHle::parseCardPath(const std::string& path,int& slot,std::string& name) const
+{
+    if(path.size()<5) return false;
+    const char b0=static_cast<char>(std::tolower(static_cast<unsigned char>(path[0])));
+    const char b1=static_cast<char>(std::tolower(static_cast<unsigned char>(path[1])));
+    if(b0!='b' || b1!='u' || path[3]!='0' || path[4]!=':') return false;
+    if(path[2]=='0') slot=0;
+    else if(path[2]=='1') slot=1;
+    else return false;
+    name=path.substr(5);
+    return true;
+}
+
+void BiosHle::updateCardFrameChecksum(unsigned slot,unsigned sector)
+{
+    if(slot>=m_cards.size() || sector>=1024u || m_cards[slot].size()!=0x20000u) return;
+    const std::size_t base=static_cast<std::size_t>(sector)*128u;
+    uint8_t x=0;
+    for(unsigned i=0;i<127u;++i) x^=m_cards[slot][base+i];
+    m_cards[slot][base+127u]=x;
+}
+
+void BiosHle::formatCard(unsigned slot)
+{
+    if(slot>=m_cards.size()) return;
+    std::vector<uint8_t>& card=m_cards[slot];
+    card.assign(0x20000u,0xFFu);
+
+    std::fill(card.begin(),card.begin()+128u,0);
+    card[0]='M'; card[1]='C';
+    updateCardFrameChecksum(slot,0);
+
+    for(unsigned frame=1;frame<=15u;++frame){
+        const std::size_t base=static_cast<std::size_t>(frame)*128u;
+        std::fill(card.begin()+base,card.begin()+base+128u,0);
+        card[base+0]=0xA0u;
+        card[base+8]=0xFFu;
+        card[base+9]=0xFFu;
+        updateCardFrameChecksum(slot,frame);
+    }
+
+    for(unsigned frame=16;frame<=35u;++frame){
+        const std::size_t base=static_cast<std::size_t>(frame)*128u;
+        std::fill(card.begin()+base,card.begin()+base+128u,0);
+        card[base+0]=0xFFu; card[base+1]=0xFFu;
+        card[base+2]=0xFFu; card[base+3]=0xFFu;
+        updateCardFrameChecksum(slot,frame);
+    }
+
+    // Frame 63 is a backup of the header on retail cards.
+    std::copy(card.begin(),card.begin()+128u,card.begin()+63u*128u);
+}
+
+int BiosHle::cardSlotFromPort(uint32_t port) const
+{
+    if(port==0u) return 0;
+    if(port==0x10u || port==1u) return 1;
+    return -1;
+}
+
+void BiosHle::signalCardIoSuccess(uint32_t fd)
+{
+    const uint32_t cls=(fd<16u) ? fd : 0xF0000011u;
+    const uint32_t cb=deliverEvent(cls,0x00000004u);
+    if(cb && m_pendingEventCallback==0) m_pendingEventCallback=cb;
+}
+
+bool BiosHle::cardReadSector(uint32_t port,uint32_t sector,uint32_t dst)
+{
+    const int slot=cardSlotFromPort(port);
+    if(slot<0 || sector>0x3FFu || dst==0) return false;
+    std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(slot)];
+    if(card.size()!=0x20000u) formatCard(static_cast<unsigned>(slot));
+    m_cardStatus[static_cast<unsigned>(slot)]=2;
+    const std::size_t base=static_cast<std::size_t>(sector)*128u;
+    for(unsigned i=0;i<128u;++i) m_mem.write8(dst+i,card[base+i]);
+    m_cardStatus[static_cast<unsigned>(slot)]=1;
+    signalCardIoSuccess();
+    tracePrintf("[BIOS CARD READ] slot=%d sector=%u dst=%08X\n",slot,(unsigned)sector,(unsigned)dst);
+    return true;
+}
+
+bool BiosHle::cardWriteSector(uint32_t port,uint32_t sector,uint32_t src)
+{
+    const int slot=cardSlotFromPort(port);
+    if(slot<0 || sector>0x3FFu) return false;
+    std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(slot)];
+    if(card.size()!=0x20000u) formatCard(static_cast<unsigned>(slot));
+    m_cardStatus[static_cast<unsigned>(slot)]=4;
+    if(src!=0){
+        const std::size_t base=static_cast<std::size_t>(sector)*128u;
+        for(unsigned i=0;i<128u;++i) card[base+i]=m_mem.read8(src+i);
+    }
+    m_cardIgnoreChange[static_cast<unsigned>(slot)]=false;
+    m_cardStatus[static_cast<unsigned>(slot)]=1;
+    signalCardIoSuccess();
+    tracePrintf("[BIOS CARD WRITE] slot=%d sector=%u src=%08X%s\n",
+                slot,(unsigned)sector,(unsigned)src,src?"":" dummy");
+    return true;
+}
+
+int BiosHle::findCardFile(int slot,const std::string& pattern,unsigned startBlock,bool includeDeleted) const
+{
+    if(slot<0 || slot>=2 || m_cards[static_cast<unsigned>(slot)].size()!=0x20000u) return -1;
+    const std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(slot)];
+    if(startBlock<1u) startBlock=1u;
+    for(unsigned block=startBlock;block<=15u;++block){
+        const std::size_t base=static_cast<std::size_t>(block)*128u;
+        const uint8_t state=card[base];
+        const bool live=state==0x51u;
+        const bool deleted=state==0xA1u;
+        if(!live && !(includeDeleted && deleted)) continue;
+        std::string filename;
+        for(unsigned i=0;i<20u;++i){
+            const uint8_t ch=card[base+0x0Au+i];
+            if(ch==0) break;
+            filename.push_back(static_cast<char>(ch));
+        }
+        if(wildcardMatch(pattern,filename)) return static_cast<int>(block);
+    }
+    return -1;
+}
+
+int BiosHle::createCardFile(int slot,const std::string& name,unsigned blocks)
+{
+    if(slot<0 || slot>=2 || blocks==0 || blocks>15u) return -1;
+    std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(slot)];
+    if(card.size()!=0x20000u) formatCard(static_cast<unsigned>(slot));
+
+    std::vector<unsigned> freeBlocks;
+    for(unsigned block=1;block<=15u && freeBlocks.size()<blocks;++block){
+        const uint8_t state=card[static_cast<std::size_t>(block)*128u];
+        if(state>=0xA0u && state<=0xA3u) freeBlocks.push_back(block);
+    }
+    if(freeBlocks.size()!=blocks) return -1;
+
+    for(unsigned n=0;n<blocks;++n){
+        const unsigned block=freeBlocks[n];
+        const std::size_t dir=static_cast<std::size_t>(block)*128u;
+        std::fill(card.begin()+dir,card.begin()+dir+128u,0);
+
+        const uint8_t state=(n==0) ? 0x51u : ((n+1u==blocks) ? 0x53u : 0x52u);
+        card[dir]=state;
+
+        if(n==0){
+            const uint32_t size=blocks*8192u;
+            card[dir+4]=static_cast<uint8_t>(size);
+            card[dir+5]=static_cast<uint8_t>(size>>8);
+            card[dir+6]=static_cast<uint8_t>(size>>16);
+            card[dir+7]=static_cast<uint8_t>(size>>24);
+            const std::size_t count=std::min<std::size_t>(20u,name.size());
+            for(std::size_t i=0;i<count;++i) card[dir+0x0Au+i]=static_cast<uint8_t>(name[i]);
+        }
+
+        if(n+1u<blocks){
+            const uint16_t next=static_cast<uint16_t>(freeBlocks[n+1u]-1u);
+            card[dir+8]=static_cast<uint8_t>(next);
+            card[dir+9]=static_cast<uint8_t>(next>>8);
+        } else {
+            card[dir+8]=0xFFu; card[dir+9]=0xFFu;
+        }
+        updateCardFrameChecksum(static_cast<unsigned>(slot),block);
+
+        const std::size_t data=static_cast<std::size_t>(block)*8192u;
+        std::fill(card.begin()+data,card.begin()+data+8192u,0);
+    }
+
+    tracePrintf("[BIOS CARD CREATE] slot=%d name=%s blocks=%u first=%u\n",
+                slot,name.c_str(),blocks,freeBlocks[0]);
+    return static_cast<int>(freeBlocks[0]);
+}
+
+uint32_t BiosHle::cardFileSize(int slot,unsigned firstBlock) const
+{
+    if(slot<0 || slot>=2 || firstBlock<1u || firstBlock>15u) return 0;
+    const std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(slot)];
+    if(card.size()!=0x20000u) return 0;
+    const std::size_t base=static_cast<std::size_t>(firstBlock)*128u+4u;
+    return uint32_t(card[base]) |
+           (uint32_t(card[base+1u])<<8) |
+           (uint32_t(card[base+2u])<<16) |
+           (uint32_t(card[base+3u])<<24);
+}
+
+bool BiosHle::cardFileCopy(FileHandle& file,uint32_t guestAddress,uint32_t length,bool write)
+{
+    if(file.slot<0 || file.slot>=2 || file.firstBlock<1u || file.firstBlock>15u) return false;
+    if(guestAddress==0 && length!=0) return false;
+    std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(file.slot)];
+    if(card.size()!=0x20000u) return false;
+
+    const uint32_t remain=(file.position<file.size) ? (file.size-file.position) : 0u;
+    const uint32_t count=std::min<uint32_t>(length,remain);
+    uint32_t done=0;
+    while(done<count){
+        const uint32_t absolute=file.position+done;
+        unsigned hops=absolute/8192u;
+        unsigned block=file.firstBlock;
+        while(hops--){
+            const std::size_t dir=static_cast<std::size_t>(block)*128u;
+            const uint16_t link=uint16_t(card[dir+8u]) | (uint16_t(card[dir+9u])<<8);
+            if(link==0xFFFFu) return false;
+            block=static_cast<unsigned>(link)+1u;
+            if(block<1u || block>15u) return false;
+        }
+
+        const uint32_t inBlock=absolute%8192u;
+        const uint32_t chunk=std::min<uint32_t>(count-done,8192u-inBlock);
+        const std::size_t cardPos=static_cast<std::size_t>(block)*8192u+inBlock;
+        for(uint32_t i=0;i<chunk;++i){
+            if(write) card[cardPos+i]=m_mem.read8(guestAddress+done+i);
+            else m_mem.write8(guestAddress+done+i,card[cardPos+i]);
+        }
+        done+=chunk;
+    }
+    file.position+=done;
+    return done==count;
+}
+
+int BiosHle::allocFileHandle()
+{
+    for(unsigned i=2;i<m_files.size();++i)
+        if(!m_files[i].used) return static_cast<int>(i);
+    return -1;
+}
+
+int32_t BiosHle::openBiosFile(const std::string& path,uint32_t accessMode)
+{
+    int slot=-1;
+    std::string name;
+    if(!parseCardPath(path,slot,name) || accessMode==0) return -1;
+
+    int block=findCardFile(slot,name,1u,false);
+    if(block<0 && (accessMode&0x200u)){
+        unsigned blocks=accessMode>>16;
+        if(blocks==0) blocks=1;
+        block=createCardFile(slot,name,blocks);
+    }
+    if(block<0) return -1;
+
+    const int fd=allocFileHandle();
+    if(fd<0) return -1;
+
+    FileHandle h;
+    h.used=true;
+    h.slot=slot;
+    h.firstBlock=static_cast<uint32_t>(block);
+    h.position=0;
+    h.size=cardFileSize(slot,static_cast<unsigned>(block));
+    h.accessMode=accessMode;
+    h.async=(accessMode&0x8000u)!=0;
+    h.name=name;
+    m_files[static_cast<unsigned>(fd)]=h;
+
+    tracePrintf("[BIOS FILE OPEN] fd=%d slot=%d name=%s mode=%08X size=%u\n",
+                fd,slot,name.c_str(),(unsigned)accessMode,(unsigned)h.size);
+    return fd;
+}
+
+int32_t BiosHle::readBiosFile(uint32_t fd,uint32_t dst,uint32_t length)
+{
+    if(fd>=m_files.size() || !m_files[fd].used || length==0) return -1;
+    FileHandle& h=m_files[fd];
+    const uint32_t before=h.position;
+    const uint32_t available=(before<h.size)?(h.size-before):0u;
+    const uint32_t count=std::min<uint32_t>(length,available);
+    if(!cardFileCopy(h,dst,count,false)) return -1;
+    if(h.async) signalCardIoSuccess(fd);
+    tracePrintf("[BIOS FILE READ] fd=%u dst=%08X request=%u done=%u pos=%u\n",
+                (unsigned)fd,(unsigned)dst,(unsigned)length,(unsigned)count,(unsigned)h.position);
+    return static_cast<int32_t>(count);
+}
+
+int32_t BiosHle::writeBiosFile(uint32_t fd,uint32_t src,uint32_t length)
+{
+    if(fd>=m_files.size() || !m_files[fd].used || length==0) return -1;
+    FileHandle& h=m_files[fd];
+    const uint32_t before=h.position;
+    const uint32_t available=(before<h.size)?(h.size-before):0u;
+    const uint32_t count=std::min<uint32_t>(length,available);
+    if(!cardFileCopy(h,src,count,true)) return -1;
+    if(h.async) signalCardIoSuccess(fd);
+    tracePrintf("[BIOS FILE WRITE] fd=%u src=%08X request=%u done=%u pos=%u\n",
+                (unsigned)fd,(unsigned)src,(unsigned)length,(unsigned)count,(unsigned)h.position);
+    return static_cast<int32_t>(count);
+}
+
+int32_t BiosHle::closeBiosFile(uint32_t fd)
+{
+    if(fd>=m_files.size() || !m_files[fd].used) return -1;
+    m_files[fd]=FileHandle();
+    tracePrintf("[BIOS FILE CLOSE] fd=%u\n",(unsigned)fd);
+    return 0;
+}
+
+void BiosHle::fillCardDirEntry(int slot,unsigned block,uint32_t dirEntry) const
+{
+    if(slot<0 || slot>=2 || block<1u || block>15u || dirEntry==0) return;
+    const std::vector<uint8_t>& card=m_cards[static_cast<unsigned>(slot)];
+    const std::size_t base=static_cast<std::size_t>(block)*128u;
+
+    for(unsigned i=0;i<0x28u;++i) const_cast<PsxMemory&>(m_mem).write8(dirEntry+i,0);
+    for(unsigned i=0;i<20u;++i){
+        const uint8_t ch=card[base+0x0Au+i];
+        const_cast<PsxMemory&>(m_mem).write8(dirEntry+i,ch);
+        if(ch==0) break;
+    }
+    const_cast<PsxMemory&>(m_mem).write32(dirEntry+0x14u,0x50u);
+    const_cast<PsxMemory&>(m_mem).write32(dirEntry+0x18u,cardFileSize(slot,block));
+    const_cast<PsxMemory&>(m_mem).write32(dirEntry+0x1Cu,0);
+    const_cast<PsxMemory&>(m_mem).write32(dirEntry+0x20u,block*64u);
+    const_cast<PsxMemory&>(m_mem).write32(dirEntry+0x24u,0);
+}
+
+uint32_t BiosHle::firstCardFile(const std::string& path,uint32_t dirEntry)
+{
+    int slot=-1;
+    std::string pattern;
+    if(!parseCardPath(path,slot,pattern) || dirEntry==0) return 0;
+    const int block=findCardFile(slot,pattern,1u,false);
+    if(block<0){ m_find=FindState(); return 0; }
+
+    m_find.active=true;
+    m_find.slot=slot;
+    m_find.nextBlock=static_cast<unsigned>(block)+1u;
+    m_find.pattern=pattern;
+    fillCardDirEntry(slot,static_cast<unsigned>(block),dirEntry);
+    tracePrintf("[BIOS FILE FIRST] slot=%d pattern=%s block=%d\n",slot,pattern.c_str(),block);
+    return dirEntry;
+}
+
+uint32_t BiosHle::nextCardFile(uint32_t dirEntry)
+{
+    if(!m_find.active || dirEntry==0) return 0;
+    const int block=findCardFile(m_find.slot,m_find.pattern,m_find.nextBlock,false);
+    if(block<0){ m_find.active=false; return 0; }
+    m_find.nextBlock=static_cast<unsigned>(block)+1u;
+    fillCardDirEntry(m_find.slot,static_cast<unsigned>(block),dirEntry);
+    tracePrintf("[BIOS FILE NEXT] slot=%d block=%d\n",m_find.slot,block);
+    return dirEntry;
+}
 
 uint32_t BiosHle::openEvent(uint32_t cls,uint32_t spec,uint32_t mode,uint32_t func)
 {
