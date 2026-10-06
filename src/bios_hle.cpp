@@ -929,7 +929,32 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
      * O trampoline restaura todo o contexto interrompido depois do jr ra.
      */
     c.pc = c.cop0[14];
-    if(pending && startInterruptChain(c,resumeState)){
+
+    // A raw CD decoder IRQ must not be routed through an unrelated Card/PAD
+    // SysIntRP entry merely because some lower-priority chain exists. The
+    // trace showed priority 2 FIRST=80065564 returning zero for CD INT3,
+    // after which the generic fallback erased I_STAT and libcd timed out.
+    //
+    // When no BIOS CD event/callback consumed this source, leave HINTSTS and
+    // the response FIFO intact for libcd polling, acknowledge only the global
+    // I_STAT latch, and resume the interrupted instruction. A later decoder
+    // register ACK will clear HINTSTS in the normal guest path.
+    const bool rawCdOnly =
+        (pending & IrqController::Cdrom) != 0 &&
+        irqCallback == 0 &&
+        m_intRpHeads[0] == 0;
+
+    if(rawCdOnly){
+        m_irq.acknowledge(static_cast<uint16_t>(0x07FFu & ~IrqController::Cdrom));
+        c=resumeState;
+        tracePrintf(
+            "[BIOS CD RAW RESUME] pending=%04X flags=%02X "
+            "skip-unrelated-SysIntRP=1 resumePC=%08X\n",
+            (unsigned)pending,
+            (unsigned)m_cdrom.irqFlags(),
+            (unsigned)c.pc
+        );
+    } else if(pending && startInterruptChain(c,resumeState)){
         tracePrintf("[BIOS IRQ CHAIN DISPATCH] pending=%04X\n",(unsigned)pending);
     } else if(irqCallback){
         beginEventCallback(c,resumeState,irqCallback);
