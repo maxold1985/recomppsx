@@ -21,7 +21,7 @@ public:
 
     void reset();
     void initializeCdrom();
-    void observeNativeVectorCall(uint32_t vector, const r3k::CpuState& before, const r3k::CpuState& after);
+    void observeNativeVectorCall(uint32_t vector, const r3k::CpuState& before, r3k::CpuState& after);
     bool handleVector(r3k::CpuState& cpu);
     bool handleExceptionVector(r3k::CpuState& cpu);
 
