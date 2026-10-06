@@ -625,7 +625,7 @@ int32_t BiosHle::closeBiosFile(uint32_t fd)
     if(fd>=m_files.size() || !m_files[fd].used) return -1;
     m_files[fd]=FileHandle();
     tracePrintf("[BIOS FILE CLOSE] fd=%u\n",(unsigned)fd);
-    return 0;
+    return static_cast<int32_t>(fd);
 }
 
 void BiosHle::fillCardDirEntry(int slot,unsigned block,uint32_t dirEntry) const
@@ -869,9 +869,65 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
 {
     switch(fn){
         case 0x0E: c.gpr[2]=uint32_t(std::abs(static_cast<int32_t>(arg(c,0)))); break;
+        case 0x13: { // setjmp(buf)
+            const uint32_t b=arg(c,0);
+            if(b){
+                m_mem.write32(b+0x00u,c.gpr[31]);
+                m_mem.write32(b+0x04u,c.gpr[29]);
+                m_mem.write32(b+0x08u,c.gpr[30]);
+                for(unsigned i=0;i<8u;++i) m_mem.write32(b+0x0Cu+i*4u,c.gpr[16u+i]);
+                m_mem.write32(b+0x2Cu,c.gpr[28]);
+            }
+            c.gpr[2]=0;
+            break;
+        }
+        case 0x17: { // strcmp
+            uint32_t a=arg(c,0),b=arg(c,1);
+            int32_t result=0;
+            for(unsigned guard=0;guard<0x10000u;++guard){
+                const uint8_t ca=m_mem.read8(a++),cb=m_mem.read8(b++);
+                if(ca!=cb){ result=int32_t(ca)-int32_t(cb); break; }
+                if(ca==0) break;
+            }
+            c.gpr[2]=static_cast<uint32_t>(result);
+            break;
+        }
+        case 0x18: { // strncmp
+            uint32_t a=arg(c,0),b=arg(c,1),n=arg(c,2);
+            int32_t result=0;
+            for(uint32_t i=0;i<n;++i){
+                const uint8_t ca=m_mem.read8(a+i),cb=m_mem.read8(b+i);
+                if(ca!=cb){ result=int32_t(ca)-int32_t(cb); break; }
+                if(ca==0) break;
+            }
+            c.gpr[2]=static_cast<uint32_t>(result);
+            break;
+        }
+        case 0x1B: { // strlen
+            const uint32_t s=arg(c,0);
+            uint32_t n=0;
+            while(n<0x100000u && m_mem.read8(s+n)!=0) ++n;
+            c.gpr[2]=n;
+            break;
+        }
+        case 0x28: fillBytes(arg(c,0),0,arg(c,1)); c.gpr[2]=arg(c,0); break; // bzero
         case 0x2A: writeBytes(arg(c,0),arg(c,1),arg(c,2)); c.gpr[2]=arg(c,0); break; // memcpy
         case 0x2B: fillBytes(arg(c,0),uint8_t(arg(c,1)),arg(c,2)); c.gpr[2]=arg(c,0); break; // memset
         case 0x2C: writeBytes(arg(c,0),arg(c,1),arg(c,2)); c.gpr[2]=arg(c,0); break; // memmove
+        case 0x2F: { // rand
+            m_randSeed=m_randSeed*0x41C64E6Du+0x3039u;
+            c.gpr[2]=(m_randSeed>>16)&0x7FFFu;
+            break;
+        }
+        case 0x30: m_randSeed=arg(c,0); c.gpr[2]=0; break; // srand
+        case 0x39: { // InitHeap
+            m_heapBase=arg(c,0);
+            m_heapSize=arg(c,1);
+            tracePrintf("[BIOS HEAP INIT] base=%08X size=%u\n",
+                        (unsigned)m_heapBase,(unsigned)m_heapSize);
+            c.gpr[2]=0;
+            break;
+        }
         case 0x3C: std::putchar(int(arg(c,0)&0xFFu)); c.gpr[2]=arg(c,0)&0xFFu; break;
         case 0x3E: { const auto s=readString(arg(c,0)); std::fputs(s.c_str(),stdout); std::fputc('\n',stdout); c.gpr[2]=0; break; }
         case 0x3F: { // Lightweight printf HLE: print format literally; preserves boot logs safely.
@@ -887,6 +943,16 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
         }
         case 0x4D: c.gpr[2]=m_mem.read32(psxgpu::PsxGpuMmio::GP1); break;
         case 0x4E: c.gpr[2]=0; break; // gpu_sync: immediate in HLE
+        case 0x55: // _bu_init (alias)
+        case 0x70: { // _bu_init
+            m_cardInitialized=true;
+            m_cardStarted=true;
+            m_cardStatus[0]=m_cardStatus[1]=1;
+            m_cardIgnoreChange[0]=m_cardIgnoreChange[1]=false;
+            tracePrintf("[BIOS CARD INIT] _bu_init\n");
+            c.gpr[2]=1;
+            break;
+        }
         case 0x54: // _96_init (alias)
         case 0x71: { // _96_init
             initializeCdrom();
@@ -950,6 +1016,33 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
             tracePrintf("[BIOS CD AUTOABORT] type=%08X flag=%08X\n",
                         (unsigned)arg(c,0),(unsigned)arg(c,1));
             c.gpr[2]=1;
+            break;
+        }
+        case 0xAB: { // _card_info(port)
+            const int slot=cardSlotFromPort(arg(c,0));
+            if(slot<0){ c.gpr[2]=0; break; }
+            m_cardStatus[static_cast<unsigned>(slot)]=8;
+            m_cardStatus[static_cast<unsigned>(slot)]=1;
+            const uint32_t cb=deliverEvent(0xF4000001u,0x00000004u);
+            if(cb && m_pendingEventCallback==0) m_pendingEventCallback=cb;
+            tracePrintf("[BIOS CARD INFO] slot=%d port=%08X cb=%08X\n",
+                        slot,(unsigned)arg(c,0),(unsigned)cb);
+            c.gpr[2]=1;
+            break;
+        }
+        case 0xAC: { // _card_load(port)
+            const int slot=cardSlotFromPort(arg(c,0));
+            if(slot<0){ c.gpr[2]=0; break; }
+            if(m_cards[static_cast<unsigned>(slot)].size()!=0x20000u)
+                formatCard(static_cast<unsigned>(slot));
+            const bool valid=m_cards[static_cast<unsigned>(slot)][0]=='M' &&
+                             m_cards[static_cast<unsigned>(slot)][1]=='C';
+            m_cardStatus[static_cast<unsigned>(slot)]=valid ? 1u : 0x21u;
+            const uint32_t cb=deliverEvent(0xF4000001u,valid?0x00000004u:0x00008000u);
+            if(cb && m_pendingEventCallback==0) m_pendingEventCallback=cb;
+            tracePrintf("[BIOS CARD LOAD] slot=%d valid=%u cb=%08X\n",
+                        slot,valid?1u:0u,(unsigned)cb);
+            c.gpr[2]=valid?1u:0u;
             break;
         }
         case 0xA2: { // EnqueueCdIntr -- BIOS priority 0
@@ -1072,6 +1165,14 @@ void BiosHle::callB(r3k::CpuState& c,uint8_t fn)
         case 0x0B: {auto*e=eventFromHandle(arg(c,0));c.gpr[2]=(e&&e->enabled&&e->ready)?1u:0u;if(c.gpr[2])e->ready=false;break;}
         case 0x0C: {const uint32_t h=arg(c,0);auto*e=eventFromHandle(h);if(e)e->enabled=true;tracePrintf("[BIOS EVENT ENABLE] h=%08X ok=%d\n",h,e?1:0);c.gpr[2]=1;break;}
         case 0x0D: {auto*e=eventFromHandle(arg(c,0));if(e)e->enabled=false;c.gpr[2]=1;break;}
+        case 0x0E: c.gpr[2]=openThread(c,arg(c,0),arg(c,1),arg(c,2)); break; // OpenTh
+        case 0x0F: c.gpr[2]=closeThread(arg(c,0)); break; // CloseTh
+        case 0x10: { // ChangeTh
+            const uint32_t h=arg(c,0);
+            const uint32_t ok=changeThread(c,h);
+            if(!m_threadSwitchPerformed) c.gpr[2]=ok;
+            break;
+        }
         case 0x12: { // InitPAD2
             m_padBuf1=arg(c,0);m_padSize1=arg(c,1);m_padBuf2=arg(c,2);m_padSize2=arg(c,3);
             if(m_padBuf1)fillBytes(m_padBuf1,0,uint32_t(std::min<uint32_t>(m_padSize1,0x22u)));
@@ -1090,7 +1191,45 @@ void BiosHle::callB(r3k::CpuState& c,uint8_t fn)
             uint32_t low=c.cop0[12]&0x3Fu;c.cop0[12]=(c.cop0[12]&~0x3Fu)|((low>>2)&0x0Fu);c.pc=c.cop0[14];c.gpr[2]=1;return; }
         case 0x18: c.gpr[2]=1; break; // ResetEntryInt
         case 0x19: c.gpr[2]=1; break; // HookEntryInt accepted by simplified HLE
+        case 0x32: { // open
+            const std::string path=readString(arg(c,0));
+            c.gpr[2]=static_cast<uint32_t>(openBiosFile(path,arg(c,1)));
+            break;
+        }
+        case 0x34: c.gpr[2]=static_cast<uint32_t>(readBiosFile(arg(c,0),arg(c,1),arg(c,2))); break;
+        case 0x35: c.gpr[2]=static_cast<uint32_t>(writeBiosFile(arg(c,0),arg(c,1),arg(c,2))); break;
+        case 0x36: c.gpr[2]=static_cast<uint32_t>(closeBiosFile(arg(c,0))); break;
+        case 0x3F: {
+            const std::string s=readString(arg(c,0));
+            std::fputs(s.c_str(),stdout);
+            std::fputc('\n',stdout);
+            c.gpr[2]=0;
+            break;
+        }
+        case 0x42: c.gpr[2]=firstCardFile(readString(arg(c,0)),arg(c,1)); break;
+        case 0x43: c.gpr[2]=nextCardFile(arg(c,0)); break;
+        case 0x4A: { // InitCARD2
+            m_cardInitialized=true;
+            m_cardStatus[0]=m_cardStatus[1]=1;
+            tracePrintf("[BIOS CARD InitCARD2] pad_enable=%08X\n",(unsigned)arg(c,0));
+            c.gpr[2]=1;
+            break;
+        }
+        case 0x4B: m_cardStarted=true; c.gpr[2]=1; tracePrintf("[BIOS CARD StartCARD2]\n"); break;
+        case 0x4C: m_cardStarted=false; c.gpr[2]=1; tracePrintf("[BIOS CARD StopCARD2]\n"); break;
+        case 0x4E: c.gpr[2]=cardWriteSector(arg(c,0),arg(c,1),arg(c,2))?1u:0u; break;
+        case 0x4F: c.gpr[2]=cardReadSector(arg(c,0),arg(c,1),arg(c,2))?1u:0u; break;
+        case 0x50:
+            m_cardIgnoreChange[0]=m_cardIgnoreChange[1]=true;
+            c.gpr[2]=1;
+            tracePrintf("[BIOS CARD NEW] ignore-change-once\n");
+            break;
         case 0x5B: {const bool old=m_clearPad;m_clearPad=arg(c,0)!=0;c.gpr[2]=old?1u:0u;break;}
+        case 0x5C: {
+            const uint32_t slot=arg(c,0);
+            c.gpr[2]=(slot<2u)?m_cardStatus[slot]:0x11u;
+            break;
+        }
         default: c.gpr[2]=0; break;
     }
 }
