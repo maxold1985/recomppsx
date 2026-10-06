@@ -38,8 +38,63 @@ void BiosHle::initializeCdrom()
     m_cdrom.write8(0x1F801803u, 0x1Fu); // clear stale HINTSTS low bits
     m_cdrom.write8(0x1F801800u, 0x00u); // bank 0
     m_irq.setMask(static_cast<uint16_t>(m_irq.mask() | IrqController::Cdrom));
-    tracePrintf("[BIOS CD INIT] post-boot _96_init HINTMSK=1F I_MASK=%04X\n",
+    tracePrintf("[BIOS CD INIT] post-boot _96_init HINTMSK=1F I_MASK=%04X priority0=HLE\n",
                 (unsigned)m_irq.mask());
+}
+
+bool BiosHle::serviceRetailCdromIntRp(uint32_t& callback)
+{
+    const uint16_t pending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
+    if(!m_cdBiosIrqInstalled || (pending & IrqController::Cdrom)==0)
+        return false;
+
+    // _96_init in the retail BIOS leaves a priority-0 CD SysIntRP service
+    // installed. Direct PS-X EXE boot has no ROM routine to execute, so HLE
+    // FIRST here: IRQ2/CD pending means SECOND must run.
+    tracePrintf(
+        "[BIOS CD INTRP FIRST] pending=%04X flags=%02X result=1\n",
+        (unsigned)pending,(unsigned)m_cdrom.irqFlags());
+
+    // HLE SECOND: consume decoder response/flags and perform the externally
+    // visible BIOS CD side effects even when no F0000003 event was opened.
+    const uint8_t flags=m_cdrom.irqFlags();
+    const uint8_t type=static_cast<uint8_t>(flags & 0x07u);
+    uint8_t response0=0;
+    uint8_t response1=0;
+    if(m_cdrom.responseBytesAvailable()!=0)
+        response0=m_cdrom.read8(0x1F801801u);
+    if(m_cdrom.responseBytesAvailable()!=0)
+        response1=m_cdrom.read8(0x1F801801u);
+
+    if(response0!=0) m_cdLastStatus=response0;
+    if(type==5u) m_cdLastError=response1;
+
+    uint32_t eventSpec=0;
+    switch(type){
+        case 1: eventSpec=0x10u; break;
+        case 2: eventSpec=0x20u; break;
+        case 3: eventSpec=0x20u; break;
+        case 4: eventSpec=0x80u; break;
+        case 5: eventSpec=0x8000u; break;
+        default: break;
+    }
+
+    const uint32_t irqEvent=deliverEvent(0xF0000003u,0x1000u);
+    if(!callback) callback=irqEvent;
+    if(eventSpec){
+        const uint32_t cb=deliverEvent(0xF0000003u,eventSpec);
+        if(!callback) callback=cb;
+    }
+
+    m_cdrom.acknowledgeInterrupt(0x1Fu);
+    m_irq.acknowledge(static_cast<uint16_t>(0x07FFu & ~IrqController::Cdrom));
+
+    tracePrintf(
+        "[BIOS CD INTRP SECOND] type=%u flags=%02X status=%02X error=%02X "
+        "spec=%04X I_STAT=%04X\n",
+        (unsigned)type,(unsigned)flags,(unsigned)m_cdLastStatus,
+        (unsigned)m_cdLastError,(unsigned)eventSpec,(unsigned)m_irq.stat());
+    return true;
 }
 
 bool BiosHle::serviceCdromInterrupt(uint32_t& callback)
@@ -679,7 +734,11 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
     // before guest Card/PAD chains (typically priorities 1/2), then recompute
     // pending sources so an already-consumed CD IRQ is not misrouted.
     if(pending & IrqController::Cdrom){
-        const bool cdConsumed=serviceCdromInterrupt(irqCallback);
+        // Direct PS-X EXE boot skips the ROM's _96_init SysIntRP element.
+        // Reproduce that persistent priority-0 FIRST/SECOND service in HLE.
+        bool cdConsumed=serviceRetailCdromIntRp(irqCallback);
+        if(!cdConsumed)
+            cdConsumed=serviceCdromInterrupt(irqCallback);
         if(cdConsumed)
             pending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
     }
