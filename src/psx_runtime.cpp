@@ -483,7 +483,10 @@ bool PsxRuntime::initializeOpenBiosCdrom()
     m_cpu.cop0[12]=0x40000401u;
     m_cpu.cop0[15]=0x0000001Fu;
 
-    m_openBiosBootstrapActive=false;
+    // Reuse the bootstrap execution mode so hardware IRQ exceptions at
+    // 0x80000080 stay inside the real BIOS during _96_init instead of being
+    // diverted to the recomppsx HLE compatibility path.
+    m_openBiosBootstrapActive=true;
     m_openBiosCallActive=true;
     m_openBiosVectorPc=0x000000A0u;
 
@@ -492,15 +495,35 @@ bool PsxRuntime::initializeOpenBiosCdrom()
 
     bool completed=false;
     unsigned steps=0;
-    const unsigned kMaxCdInitSteps=500000u;
+    const unsigned kMaxCdInitSteps=2000000u;
 
     for(;steps<kMaxCdInitSteps;++steps){
         if(!m_openBiosCallActive){
             completed=true;
             break;
         }
+
+        const uint64_t cyclesBefore=m_cpu.cycles;
         if(!stepOpenBios())
             break;
+
+        uint64_t elapsed64=m_cpu.cycles-cyclesBefore;
+        if(elapsed64==0) elapsed64=1;
+        const uint32_t elapsed=
+            elapsed64>0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(elapsed64);
+
+        // _96_init waits on asynchronous CD controller responses. Advance the
+        // emulated controller and let pending IRQ2 enter the native BIOS
+        // exception handler while this temporary BIOS call is executing.
+        m_cdrom.tick(elapsed);
+        m_irq.updateCop0(m_cpu);
+        m_irq.takeInterrupt(m_cpu);
+        m_irq.updateCop0(m_cpu);
+
+        if(!m_openBiosCallActive){
+            completed=true;
+            break;
+        }
     }
 
     const uint32_t stopPc=m_cpu.pc;
