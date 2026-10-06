@@ -324,13 +324,19 @@ void PsxRuntime::loadExecutable(const PsxExeImage& image)
     // bootstrap a usable kernel, keep its native kernel/CD state intact.
     // Only the pure-HLE path (or a failed BIOS bootstrap) synthesizes _96_init.
     bool nativeKernel=false;
-    if(m_biosBackend==BiosBackendOpenBios && m_memory.hasBiosRom())
+    bool nativeCdrom=false;
+    if(m_biosBackend==BiosBackendOpenBios && m_memory.hasBiosRom()){
         nativeKernel=bootstrapOpenBiosKernel();
+        if(nativeKernel)
+            nativeCdrom=initializeOpenBiosCdrom();
+    }
 
-    if(!nativeKernel){
+    if(!nativeCdrom){
         m_bios.initializeCdrom();
+        if(nativeKernel)
+            tracePrintf("[RUNTIME] native BIOS kernel ready but native _96_init failed; CD HLE fallback enabled\n");
     } else {
-        tracePrintf("[RUNTIME] native BIOS kernel ready; preserving native CD/IRQ state (HLE _96_init skipped)\n");
+        tracePrintf("[RUNTIME] native BIOS kernel/CD ready; preserving native CD/IRQ state (HLE _96_init skipped)\n");
     }
     if (!image.payload.empty())
         m_memory.loadBytes(image.load_address, image.payload.data(), image.payload.size());
@@ -450,6 +456,74 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
     // clears RAM/devices/HLE state but preserves the selected backend and the
     // mapped BIOS ROM, so direct-EXE startup can continue on the old HLE path.
     reset();
+    return false;
+}
+
+bool PsxRuntime::initializeOpenBiosCdrom()
+{
+    if(m_biosBackend!=BiosBackendOpenBios ||
+       !m_openBiosKernelReady ||
+       !m_memory.hasBiosRom())
+        return false;
+
+    const r3k::CpuState savedCpu=m_cpu;
+    const bool savedBootstrap=m_openBiosBootstrapActive;
+    const bool savedCall=m_openBiosCallActive;
+    const uint32_t savedVector=m_openBiosVectorPc;
+
+    // Execute A(71h) _96_init() through the native A0 trampoline. The
+    // temporary stack is above the direct-EXE load area and is discarded when
+    // the caller CPU state is restored; all BIOS RAM/MMIO side effects remain.
+    m_cpu=r3k::CpuState();
+    m_cpu.pc=0x000000A0u;
+    m_cpu.gpr[9]=0x71u;               // t1 = BIOS function number
+    m_cpu.gpr[29]=0x801FF000u;         // temporary kernel-call stack
+    m_cpu.gpr[30]=0x801FF000u;
+    m_cpu.gpr[31]=0x80010000u;         // sentinel outside BIOS ROM/kernel RAM
+    m_cpu.cop0[12]=0x40000401u;
+    m_cpu.cop0[15]=0x0000001Fu;
+
+    m_openBiosBootstrapActive=false;
+    m_openBiosCallActive=true;
+    m_openBiosVectorPc=0x000000A0u;
+
+    tracePrintf("[OPENBIOS CD INIT] native A0:71 begin HINTMSK=%02X I_MASK=%04X\n",
+                (unsigned)m_cdrom.irqEnable(),(unsigned)m_irq.mask());
+
+    bool completed=false;
+    unsigned steps=0;
+    const unsigned kMaxCdInitSteps=500000u;
+
+    for(;steps<kMaxCdInitSteps;++steps){
+        if(!m_openBiosCallActive){
+            completed=true;
+            break;
+        }
+        if(!stepOpenBios())
+            break;
+    }
+
+    const uint32_t stopPc=m_cpu.pc;
+    const uint32_t ret=m_cpu.gpr[2];
+    const uint8_t hintmsk=m_cdrom.irqEnable();
+    const uint16_t imask=m_irq.mask();
+
+    m_cpu=savedCpu;
+    m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
+    m_openBiosBootstrapActive=savedBootstrap;
+    m_openBiosCallActive=savedCall;
+    m_openBiosVectorPc=savedVector;
+
+    const bool ready=completed && (hintmsk&0x1Fu)!=0u;
+    if(ready){
+        tracePrintf("[OPENBIOS CD INIT] native A0:71 complete steps=%u ret=%08X HINTMSK=%02X I_MASK=%04X\n",
+                    steps,(unsigned)ret,(unsigned)hintmsk,(unsigned)imask);
+        return true;
+    }
+
+    tracePrintf("[OPENBIOS CD INIT FALLBACK] steps=%u pc=%08X completed=%d ret=%08X HINTMSK=%02X I_MASK=%04X\n",
+                steps,(unsigned)stopPc,completed?1:0,(unsigned)ret,
+                (unsigned)hintmsk,(unsigned)imask);
     return false;
 }
 
