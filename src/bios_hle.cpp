@@ -386,12 +386,20 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
         }
         case 0x56: // _96_remove (alias)
         case 0x72: { // _96_remove
-            m_cdBiosIrqInstalled=false;
-            m_cdrom.write8(0x1F801800u, 0x01u);
-            m_cdrom.write8(0x1F801802u, 0x00u);
-            m_cdrom.write8(0x1F801803u, 0x1Fu);
-            m_cdrom.write8(0x1F801800u, 0x00u);
-            tracePrintf("[BIOS CD REMOVE] _96_remove HINTMSK=00\n");
+            /*
+             * Retail PS1 BIOS quirk:
+             * _96_remove() calls DequeueCdIntr(), but SysDeqIntRP is bugged
+             * and this removal does not work. Games can call A(72h) during
+             * startup and still rely on the BIOS CD IRQ service afterwards.
+             *
+             * Do NOT disable HINTMSK or remove the priority-0 CD service here.
+             */
+            tracePrintf(
+                "[BIOS CD REMOVE] _96_remove ignored (retail SysDeqIntRP bug); "
+                "HINTMSK=%02X installed=%u\n",
+                (unsigned)m_cdrom.irqEnable(),
+                m_cdBiosIrqInstalled ? 1u : 0u
+            );
             c.gpr[2]=1;
             break;
         }
