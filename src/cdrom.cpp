@@ -192,12 +192,10 @@ void PsxCdrom::raiseCdInterrupt(uint8_t type)
         enabled ? 1 : 0
     );
 
-    /*
-     * DEBUG/HLE TEST:
-     * Force CD-ROM IRQ even if CD interrupt-enable register
-     * wasn't programmed.
-     */
-    m_irq.request(IrqController::Cdrom);
+    // Hardware asserts the global CD-ROM IRQ only when at least one
+    // enabled HINTSTS bit is active.
+    if(enabled)
+        m_irq.request(IrqController::Cdrom);
 }
 
 bool PsxCdrom::readDirectorySector(uint32_t lba, uint8_t* dst2048)
