@@ -40,7 +40,8 @@ private:
     Event* eventFromHandle(uint32_t handle);
     bool enqueueIntRp(uint32_t priority, uint32_t struc);
     bool dequeueIntRp(uint32_t priority, uint32_t struc);
-    uint32_t firstInterruptRoutine() const;
+    bool startInterruptChain(r3k::CpuState& cpu, const r3k::CpuState& resumeState);
+    bool continueInterruptChain(r3k::CpuState& cpu);
 
     void callA(r3k::CpuState& cpu, uint8_t fn);
     void callB(r3k::CpuState& cpu, uint8_t fn);
@@ -65,6 +66,17 @@ private:
     bool m_eventCallbackActive=false;
     r3k::CpuState m_eventResumeState;
     uint32_t m_eventCallbackFunc=0;
+
+    // BIOS SysIntRP callback chain. FIRST is called for every registered
+    // element; SECOND is called only when FIRST returns v0 != 0.
+    bool m_irqChainActive=false;
+    r3k::CpuState m_irqResumeState;
+    uint32_t m_irqChainPriority=0;
+    uint32_t m_irqChainStruct=0;
+    uint32_t m_irqChainNext=0;
+    uint32_t m_irqChainSecond=0;
+    uint32_t m_irqChainFunc=0;
+    bool m_irqChainInSecond=false;
     static const uint32_t kEventCallbackTrampoline = 0x800000D0u;
 };
 
