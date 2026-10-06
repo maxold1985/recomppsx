@@ -73,6 +73,8 @@ private:
     void executeCommand(uint8_t cmd);
     void queueResponse(uint8_t value);
     void raiseCdInterrupt(uint8_t type);
+    void scheduleSecondResponse(uint8_t command, uint8_t irqType, uint32_t delayCycles);
+    void tickSecondResponse(uint32_t cpuCycles);
     void loadNextSector();
     bool detectLayout();
     bool loadDirectoryManifest(const std::string& manifestPath);
@@ -107,6 +109,13 @@ private:
     bool m_reading = false;
     bool m_playing = false;
     uint64_t m_cycleAccumulator = 0;
+
+    // Commands such as Init return INT3 immediately and INT2 later. Keep the
+    // delayed phase in the emulated controller rather than faking it in BIOS.
+    bool m_secondResponseActive = false;
+    uint8_t m_secondResponseCommand = 0;
+    uint8_t m_secondResponseIrq = 0;
+    uint32_t m_secondResponseCycles = 0;
 
     std::deque<uint8_t> m_params;
     std::deque<uint8_t> m_response;
