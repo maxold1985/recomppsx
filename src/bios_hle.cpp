@@ -464,14 +464,30 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
         }
         case 0xA2: { // EnqueueCdIntr -- BIOS priority 0
             m_cdBiosIrqInstalled=true;
-            tracePrintf("[BIOS CD ENQUEUE] priority=0 installed=1\n");
-            c.gpr[2]=1;
+            const uint32_t struc=arg(c,0);
+            bool ok=true;
+            if(struc!=0)
+                ok=enqueueIntRp(0u,struc);
+            tracePrintf(
+                "[BIOS CD ENQUEUE] priority=0 installed=1 struc=%08X "
+                "first=%08X second=%08X ok=%u\n",
+                (unsigned)struc,
+                (unsigned)(struc ? m_mem.read32(struc+8u) : 0u),
+                (unsigned)(struc ? m_mem.read32(struc+4u) : 0u),
+                ok ? 1u : 0u
+            );
+            c.gpr[2]=ok ? 1u : 0u;
             break;
         }
         case 0xA3: { // DequeueCdIntr
+            const uint32_t struc=arg(c,0);
+            bool ok=true;
+            if(struc!=0)
+                ok=dequeueIntRp(0u,struc);
             m_cdBiosIrqInstalled=false;
-            tracePrintf("[BIOS CD DEQUEUE] priority=0 installed=0\n");
-            c.gpr[2]=1;
+            tracePrintf("[BIOS CD DEQUEUE] priority=0 struc=%08X ok=%u installed=0\n",
+                        (unsigned)struc,ok ? 1u : 0u);
+            c.gpr[2]=ok ? 1u : 0u;
             break;
         }
         case 0xA5: { // CdReadSector(count, sector, buffer)
@@ -945,13 +961,18 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
         m_intRpHeads[0] == 0;
 
     if(rawCdOnly){
-        m_irq.acknowledge(static_cast<uint16_t>(0x07FFu & ~IrqController::Cdrom));
+        // Keep both decoder HINTSTS and the global CD bit visible. The guest
+        // libcd command engine polls/acks these registers itself. Do not
+        // manufacture an unrelated priority-2 interrupt and do not erase
+        // I_STAT before that code observes it.
         c=resumeState;
+        c.cop0[12] &= ~1u;
         tracePrintf(
-            "[BIOS CD RAW RESUME] pending=%04X flags=%02X "
+            "[BIOS CD RAW HOLD] pending=%04X flags=%02X I_STAT=%04X "
             "skip-unrelated-SysIntRP=1 resumePC=%08X\n",
             (unsigned)pending,
             (unsigned)m_cdrom.irqFlags(),
+            (unsigned)m_irq.stat(),
             (unsigned)c.pc
         );
     } else if(pending && startInterruptChain(c,resumeState)){
