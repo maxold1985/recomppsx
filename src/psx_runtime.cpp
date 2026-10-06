@@ -300,7 +300,8 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
     const r3k::CpuState savedCpu=m_cpu;
     m_cpu=r3k::CpuState();
     m_cpu.pc=0xBFC00000u;
-    m_cpu.cop0[12]=0x00400000u; // reset/BEV context while running the ROM bootstrap
+    m_cpu.cop0[12]=0x10900000u; // R3000A reset SR: COP0 enabled, BEV/TS set
+    m_cpu.cop0[15]=0x0000001Fu; // R3000A/IOP-compatible PRId used by BIOS reset code
     m_openBiosBootstrapActive=true;
     m_openBiosCallActive=false;
     m_openBiosVectorPc=0;
@@ -339,9 +340,10 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
 
     tracePrintf("[OPENBIOS BOOTSTRAP FALLBACK] stopped steps=%u pc=%08X; using recomppsx HLE vectors\n",
                 steps,(unsigned)bootstrapStopPc);
-    // Drop partial low-RAM kernel state. The ROM mapping remains loaded because
-    // PsxMemory::clear() intentionally does not clear the BIOS image.
-    m_memory.clear();
+    // Drop every side effect from the incomplete BIOS bootstrap. reset()
+    // clears RAM/devices/HLE state but preserves the selected backend and the
+    // mapped BIOS ROM, so direct-EXE startup can continue on the old HLE path.
+    reset();
     return false;
 }
 
