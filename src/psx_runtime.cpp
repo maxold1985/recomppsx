@@ -405,10 +405,11 @@ bool PsxRuntime::handleHle()
 {
     const uint32_t pcBefore = m_cpu.pc;
     if(stepOpenBios()) return true;
-    // Compatibility mode is intentionally retained even with OpenBIOS mapped:
-    // generated game code currently cannot execute arbitrary ROM blocks yet.
-    // A0/B0/C0 and exception vectors therefore continue through the proven HLE
-    // path while software can read the real OpenBIOS image from BIOS address space.
+    // Compatibility mode is intentionally retained even with OpenBIOS mapped.
+    // ROM PCs are executed by stepOpenBios(), but direct PS-X EXE loading skips
+    // the BIOS boot sequence that normally installs the low-RAM A0/B0/C0 tables
+    // and exception state. Those vectors therefore continue through the proven
+    // recomppsx HLE path until OpenBIOS boot/vector handoff is enabled explicitly.
     if(m_biosBackend==BiosBackendOpenBios && !m_memory.hasBiosRom())
         m_biosBackend=BiosBackendHle;
     if(m_bios.handleVector(m_cpu)){ tracePrintf("[HLE] vector pc=%08X -> %08X cycles=%llu\n", pcBefore, m_cpu.pc, (unsigned long long)m_cpu.cycles); return true; }
