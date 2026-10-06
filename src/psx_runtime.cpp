@@ -101,6 +101,30 @@ static void biosDivUnsigned(r3k::CpuState& c,uint32_t a,uint32_t b)
     c.hi=a%b;
 }
 
+static void biosEnterException(r3k::CpuState& c,uint32_t exceptionPc,
+                               uint32_t excCode,bool inDelaySlot,uint32_t branchPc)
+{
+    const uint32_t low=c.cop0[12]&0x3Fu;
+    c.cop0[12]=(c.cop0[12]&~0x3Fu)|((low<<2)&0x3Fu);
+
+    uint32_t cause=c.cop0[13]&~(0x80000000u|0x7Cu);
+    cause|=(excCode&0x1Fu)<<2;
+    if(inDelaySlot){
+        cause|=0x80000000u;
+        c.cop0[14]=branchPc;
+    } else {
+        c.cop0[14]=exceptionPc;
+    }
+    c.cop0[13]=cause;
+
+    const bool bev=(c.cop0[12]&(1u<<22))!=0u;
+    c.pc=bev?0xBFC00180u:0x80000080u;
+
+    tracePrintf("[OPENBIOS EXCEPTION] code=%u EPC=%08X Cause=%08X Status=%08X vector=%08X delay=%d\n",
+                (unsigned)excCode,(unsigned)c.cop0[14],(unsigned)c.cop0[13],
+                (unsigned)c.cop0[12],(unsigned)c.pc,inDelaySlot?1:0);
+}
+
 static bool biosExecNonControl(r3k::CpuState& c,PsxMemory& mem,PsxGte& gte,const Decoded& d)
 {
     const int32_t simm=static_cast<int16_t>(d.imm);
@@ -404,11 +428,15 @@ bool PsxRuntime::stepOpenBios()
         return false;
 
     const uint32_t physicalPc=m_cpu.pc&0x1FFFFFFFu;
-    // The early bootstrap stops before OpenBIOS installs its exception vector.
-    // If an IRQ lands on 0x80 while an A0/B0/C0 handoff is active, abort that
-    // OpenBIOS call and let the saved recomppsx HLE path retry it safely.
-    if(m_openBiosCallActive && !m_openBiosBootstrapActive && physicalPc==0x00000080u)
-        return false;
+    // Direct-EXE mode still routes hardware IRQs through recomppsx HLE because
+    // the early BIOS bootstrap stops before installing the complete runtime IRQ
+    // environment. Software exceptions (SYSCALL etc.) are allowed to enter the
+    // real BIOS exception vector so kernel services can execute natively.
+    if(m_openBiosCallActive && !m_openBiosBootstrapActive && physicalPc==0x00000080u){
+        const uint32_t excCode=(m_cpu.cop0[13]>>2)&0x1Fu;
+        if(excCode==0u)
+            return false;
+    }
 
     const bool romPc=isOpenBiosPc(m_cpu.pc);
     const bool kernelRamPc=(m_openBiosBootstrapActive || m_openBiosCallActive) &&
@@ -431,6 +459,16 @@ bool PsxRuntime::stepOpenBios()
     }
 
     bool control=false;
+
+    // SYSCALL is an exception-generating control transfer, not a normal SPECIAL
+    // ALU instruction. ExcCode 8 is handled by the BIOS exception vector.
+    if(d.op==0 && d.funct==0x0Cu){
+        biosEnterException(m_cpu,pc,8u,false,0u);
+        m_cpu.gpr[0]=0;
+        m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
+        return true;
+    }
+
     if(d.op==0 && (d.funct==0x08 || d.funct==0x09)) control=true;
     if(d.op==0x01 || d.op==0x02 || d.op==0x03 || (d.op>=0x04 && d.op<=0x07)) control=true;
     if(d.op==0x12 && d.rs==0x08) control=true;
@@ -496,6 +534,14 @@ bool PsxRuntime::stepOpenBios()
     const Decoded delay=decode(m_memory.read32(delayPc));
     ++m_cpu.cycles;
     m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
+
+    if(delay.op==0 && delay.funct==0x0Cu){
+        biosEnterException(m_cpu,delayPc,8u,true,pc);
+        m_cpu.gpr[0]=0;
+        m_memory.setCacheIsolation((m_cpu.cop0[12]&0x00010000u)!=0u);
+        return true;
+    }
+
     if(!biosExecNonControl(m_cpu,m_memory,m_gte,delay)){
         tracePrintf("[OPENBIOS DELAY UNSUPPORTED] pc=%08X raw=%08X\n",
                     (unsigned)delayPc,(unsigned)delay.raw);
