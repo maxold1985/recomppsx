@@ -157,6 +157,13 @@ bool BiosHle::startInterruptChain(r3k::CpuState& c,const r3k::CpuState& resumeSt
         c.pc=first;
         c.gpr[31]=kEventCallbackTrampoline;
         c.gpr[2]=0;
+
+        // We are already servicing a hardware exception. Keep I_STAT visible
+        // to the guest FIRST/SECOND handlers, but keep COP0 IEc cleared so the
+        // same pending source cannot immediately re-enter at the first
+        // instruction of the SysIntRP routine.
+        c.cop0[12] &= ~1u;
+
         tracePrintf("[BIOS IRQ CHAIN BEGIN] prio=%u struc=%08X first=%08X second=%08X next=%08X\n",
             (unsigned)p,(unsigned)s,(unsigned)first,(unsigned)m_irqChainSecond,(unsigned)m_irqChainNext);
         return true;
@@ -614,12 +621,18 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
      *
      * Equivalente ao deslocamento dos 6 bits inferiores.
      */
-    const uint32_t low =
-        c.cop0[12] & 0x3Fu;
-
-    c.cop0[12] =
-        (c.cop0[12] & ~0x3Fu) |
-        ((low >> 2) & 0x0Fu);
+    /*
+     * Nao execute RFE antes da cadeia SysIntRP. Durante o handler a CPU deve
+     * permanecer em estado de excecao (IEc=0), enquanto I_STAT continua
+     * legivel pelo FIRST/SECOND. O estado pos-RFE ja foi calculado em
+     * resumeState e sera restaurado quando a cadeia terminar.
+     */
+    if(!haveIntRp){
+        const uint32_t low = c.cop0[12] & 0x3Fu;
+        c.cop0[12] =
+            (c.cop0[12] & ~0x3Fu) |
+            ((low >> 2) & 0x0Fu);
+    }
 
     /*
      * Retorna para EPC, ou executa primeiro o callback BIOS mode=1000h.
