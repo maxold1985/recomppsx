@@ -177,6 +177,34 @@ void PsxCdrom::queueResponse(uint8_t value)
     if (m_response.size() < 16) m_response.push_back(value);
 }
 
+void PsxCdrom::acknowledgeInterrupt(uint8_t value)
+{
+    tracePrintf(
+        "[CD IRQ ACK] value=%02X flags_before=%02X enable=%02X\n",
+        static_cast<unsigned>(value),
+        static_cast<unsigned>(m_irqFlags),
+        static_cast<unsigned>(m_irqEnable)
+    );
+
+    m_irqFlags &= static_cast<uint8_t>(~(value & 0x1Fu));
+
+    // HCLRCTL.CLRPRM
+    if(value & 0x40u)
+        m_params.clear();
+
+    // Acknowledging the HC05 interrupt drains the response FIFO if software
+    // did not consume all response bytes first.
+    if(value & 0x07u)
+        m_response.clear();
+
+    tracePrintf(
+        "[CD IRQ ACK DONE] flags_after=%02X response=%u params=%u\n",
+        static_cast<unsigned>(m_irqFlags),
+        static_cast<unsigned>(m_response.size()),
+        static_cast<unsigned>(m_params.size())
+    );
+}
+
 void PsxCdrom::raiseCdInterrupt(uint8_t type)
 {
     m_irqFlags = type & 7u;
@@ -628,23 +656,7 @@ void PsxCdrom::write8(uint32_t paddr, uint8_t value)
                 m_data.clear();
             }
         } else if(m_index == 1) {
-            tracePrintf(
-                "[CD IRQ ACK] value=%02X flags_before=%02X enable=%02X\n",
-                static_cast<unsigned>(value),
-                static_cast<unsigned>(m_irqFlags),
-                static_cast<unsigned>(m_irqEnable)
-            );
-            std::fflush(stdout);
-
-            m_irqFlags &= static_cast<uint8_t>(~(value & 0x1Fu));
-
-            if(value & 0x40u)
-                m_params.clear();
-
-            tracePrintf(
-                "[CD IRQ ACK DONE] flags_after=%02X\n",
-                static_cast<unsigned>(m_irqFlags)
-            );
+            acknowledgeInterrupt(value);
             std::fflush(stdout);
         }
     }
