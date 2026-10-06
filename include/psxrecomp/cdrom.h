@@ -43,6 +43,7 @@ public:
     uint8_t irqEnable() const { return m_irqEnable; }
     uint8_t irqFlags() const { return m_irqFlags; }
     void acknowledgeInterrupt(uint8_t value);
+    void stopDataRead() { m_reading=false; }
 
     // HLE helpers use logical 2048-byte sectors (LBA 0 == ISO sector 0).
     bool readUserSector(uint32_t lba, uint8_t* dst2048);
