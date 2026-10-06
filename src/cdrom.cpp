@@ -185,7 +185,7 @@ void PsxCdrom::raiseCdInterrupt(uint8_t type)
         (m_irqEnable & m_irqFlags & 0x1Fu) != 0;
 
     tracePrintf(
-        "[CD IRQ RAISE] type=%u flags=%02X enable=%02X request=%d",
+        "[CD IRQ RAISE] type=%u flags=%02X enable=%02X request=%d\n",
         static_cast<unsigned>(type),
         static_cast<unsigned>(m_irqFlags),
         static_cast<unsigned>(m_irqEnable),
