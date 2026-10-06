@@ -37,6 +37,8 @@ void PsxCdrom::reset()
     m_secondResponseCommand = 0;
     m_secondResponseIrq = 0;
     m_secondResponseCycles = 0;
+    m_pendingCommandActive = false;
+    m_pendingCommand = 0;
     m_xaHist1[0]=m_xaHist1[1]=m_xaHist2[0]=m_xaHist2[1]=0;
     m_xaResamplePhase=0;
     m_params.clear();
@@ -211,6 +213,27 @@ void PsxCdrom::acknowledgeInterrupt(uint8_t value)
         static_cast<unsigned>(m_response.size()),
         static_cast<unsigned>(m_params.size())
     );
+
+    if(m_irqFlags == 0u)
+    {
+        // If a delayed INT2 matured while INT3 was pending, it has priority
+        // over a command that was written early. This mirrors the HC05 mainloop.
+        tickSecondResponse(0u);
+
+        if(m_irqFlags == 0u && m_pendingCommandActive)
+        {
+            const uint8_t command = m_pendingCommand;
+            m_pendingCommandActive = false;
+            m_pendingCommand = 0;
+
+            tracePrintf(
+                "[CD COMMAND RELEASE] cmd=%02X after-irq-ack\n",
+                static_cast<unsigned>(command)
+            );
+
+            executeCommand(command);
+        }
+    }
 }
 
 void PsxCdrom::raiseCdInterrupt(uint8_t type)
@@ -511,6 +534,24 @@ void PsxCdrom::executeCommand(uint8_t cmd)
     if(cmd==0x0Au && m_secondResponseActive && m_secondResponseCommand==0x0Au){
         tracePrintf("[CD COMMAND DROP] cmd=0A reason=init-second-response-pending\n");
         m_params.clear();
+        return;
+    }
+
+    // HC05 command execution is blocked while a previous response interrupt is
+    // still visible in HINTSTS. Keep the most recent command register write and
+    // release it from acknowledgeInterrupt() after the IRQ is cleared.
+    if(m_irqFlags != 0u)
+    {
+        tracePrintf(
+            "[CD COMMAND LATCH] cmd=%02X pending-irq=%02X replace=%d old=%02X\n",
+            static_cast<unsigned>(cmd),
+            static_cast<unsigned>(m_irqFlags),
+            m_pendingCommandActive ? 1 : 0,
+            static_cast<unsigned>(m_pendingCommand)
+        );
+
+        m_pendingCommand = cmd;
+        m_pendingCommandActive = true;
         return;
     }
 
