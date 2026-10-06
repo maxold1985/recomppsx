@@ -47,6 +47,10 @@ public:
     void clearBiosRom();
     bool hasBiosRom() const { return m_biosLoaded; }
 
+    void setCacheIsolation(bool enabled) { m_cacheIsolated = enabled; }
+    bool cacheIsolation() const { return m_cacheIsolated; }
+    uint32_t cacheControl() const { return m_cacheControl; }
+
     psxgpu::PsxGpuMmio& gpuMmio() { return m_gpuMmio; }
     const std::array<uint8_t, MainRamSize>& ram() const { return m_ram; }
 
@@ -85,6 +89,8 @@ private:
     std::array<uint8_t, 0x1000> m_io;
     std::array<DmaChannel,7> m_dma;
     uint32_t m_dicr = 0;
+    uint32_t m_cacheControl = 0;
+    bool m_cacheIsolated = false;
 };
 
 } // namespace psxrecomp
