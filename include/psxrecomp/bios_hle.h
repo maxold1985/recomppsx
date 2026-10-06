@@ -19,6 +19,7 @@ public:
     BiosHle(PsxMemory& memory, IrqController& irq, PsxTimers& timers, PsxCdrom& cdrom, PsxPadSio& pad, psxgpu::PsxGpu& gpu);
 
     void reset();
+    void initializeCdrom();
     bool handleVector(r3k::CpuState& cpu);
     bool handleExceptionVector(r3k::CpuState& cpu);
 
