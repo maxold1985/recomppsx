@@ -105,7 +105,7 @@ static bool is_control(const Decoded& d) {
 
 std::string recompile_psx_exe_to_cpp(const PsxExeImage& e, const RecompileOptions& opt) {
     std::ostringstream o;
-    o << "#include <cstdint>\n#include <limits>\n#include \"r3000a.h\"\nusing namespace r3k;\n\n";
+    o << "#include <cstdint>\n#include <limits>\n#include \"r3000a.h\"\n#include \"psxrecomp/trace.h\"\nusing namespace r3k;\n\n";
     o << "static void r3k_unknown(uint32_t,uint32_t){}\n";
     o << "static void r3k_syscall(CpuState& s){ uint32_t fn=s.gpr[4]; if(fn==1){ uint32_t old=s.cop0[12]; s.gpr[2]=((old&(1u<<10))&&(old&1u))?1u:0u; s.cop0[12]&=~((1u<<10)|1u); } else if(fn==2){ s.cop0[12]|=((1u<<10)|1u); s.gpr[2]=1; } }\n";
     o << "static void r3k_break(CpuState&){} static void r3k_cop0_unknown(uint32_t){} static void r3k_cop2_unknown(uint32_t){}\n";
@@ -125,6 +125,17 @@ std::string recompile_psx_exe_to_cpp(const PsxExeImage& e, const RecompileOption
         Decoded d=decode(ins_at(e,pc));
         o << "case "<<hex8(pc)<<"u: {\n";
         o << "++s.cycles;\n";
+        if (pc >= 0x8005C200u && pc <= 0x8005C400u) {
+            o << "psxrecomp::tracePrintf(\"[CD PC] pc=%08X raw=%08X cyc=%llu "
+                 "v0=%08X v1=%08X a0=%08X a1=%08X a2=%08X a3=%08X "
+                 "t0=%08X t1=%08X t2=%08X t3=%08X s0=%08X s1=%08X "
+                 "sp=%08X ra=%08X\\n\","
+                 "s.pc," << hex8(d.raw) << "u,"
+                 "(unsigned long long)s.cycles,"
+                 "s.gpr[2],s.gpr[3],s.gpr[4],s.gpr[5],s.gpr[6],s.gpr[7],"
+                 "s.gpr[8],s.gpr[9],s.gpr[10],s.gpr[11],"
+                 "s.gpr[16],s.gpr[17],s.gpr[29],s.gpr[31]);\n";
+        }
         if (opt.emit_comments) o << "// "<<hex8(pc)<<": "<<disasm(pc,d)<<"\n";
         if (is_control(d)) {
             // execute delay slot first, but preserve branch decision source values when needed
@@ -138,6 +149,21 @@ std::string recompile_psx_exe_to_cpp(const PsxExeImage& e, const RecompileOption
                 emit_exec(o,pc+4,ds);
             }
             // custom tail using preserved vars
+            if (pc >= 0x8005C200u && pc <= 0x8005C400u) {
+                if (d.op==0x04 || d.op==0x05) {
+                    o << "psxrecomp::tracePrintf(\"[CD BR] pc=%08X rs=%08X rt=%08X\\n\","
+                         << hex8(pc) << "u,_brs,_brt);\n";
+                } else if (d.op==0x06 || d.op==0x07 || d.op==0x01) {
+                    o << "psxrecomp::tracePrintf(\"[CD BR] pc=%08X rs=%08X\\n\","
+                         << hex8(pc) << "u,_brs);\n";
+                } else if (d.op==0 && (d.funct==0x08 || d.funct==0x09)) {
+                    o << "psxrecomp::tracePrintf(\"[CD JMP] pc=%08X target=%08X\\n\","
+                         << hex8(pc) << "u,_jtarget);\n";
+                } else if (d.op==0x02 || d.op==0x03) {
+                    o << "psxrecomp::tracePrintf(\"[CD JMP] pc=%08X target=%08X\\n\","
+                         << hex8(pc) << "u," << hex8((((pc+4)&0xF0000000u)|(d.target<<2))) << "u);\n";
+                }
+            }
             const int32_t simm=static_cast<int16_t>(d.imm);
             const uint32_t bt=pc+4+(uint32_t(simm)<<2);
             const uint32_t jt=((pc+4)&0xF0000000u)|(d.target<<2);
