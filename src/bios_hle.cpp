@@ -49,6 +49,157 @@ void BiosHle::reset()
     m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainPending=0; m_irqChainInSecond=false;
 }
 
+void BiosHle::observeNativeVectorCall(uint32_t vector,const r3k::CpuState& before,const r3k::CpuState& after)
+{
+    const uint32_t p=vector&0x1FFFFFFFu;
+    const uint8_t fn=static_cast<uint8_t>(before.gpr[9]&0xFFu);
+
+    if(p==0xA0u){
+        switch(fn){
+            case 0x55:
+            case 0x70:
+                m_cardInitialized=true;
+                m_cardStarted=true;
+                m_cardStatus[0]=m_cardStatus[1]=1;
+                break;
+            case 0xA2:
+                m_cdBiosIrqInstalled=true;
+                if(before.gpr[4] && m_intRpHeads.size()>0) m_intRpHeads[0]=before.gpr[4];
+                break;
+            case 0xA3:
+                // Retail SysDeqIntRP is bugged; keep the CD service installed
+                // just like the existing HLE _96_remove compatibility path.
+                break;
+            default:
+                break;
+        }
+    } else if(p==0xB0u){
+        switch(fn){
+            case 0x07: {
+                // Native BIOS already ran callback-mode events. Mirror only
+                // mark-ready mode state so a later HLE Test/WaitEvent agrees.
+                for(std::size_t i=0;i<m_events.size();++i){
+                    Event& e=m_events[i];
+                    if(e.used && e.enabled && e.cls==before.gpr[4] &&
+                       e.spec==before.gpr[5] && e.mode==0x2000u)
+                        e.ready=true;
+                }
+                break;
+            }
+            case 0x08: {
+                const uint32_t h=after.gpr[2];
+                if(h>=0xF1000000u){
+                    const uint32_t idx=h-0xF1000000u;
+                    if(idx<m_events.size()){
+                        Event e;
+                        e.used=true;
+                        e.enabled=false;
+                        e.ready=false;
+                        e.cls=before.gpr[4];
+                        e.spec=before.gpr[5];
+                        e.mode=before.gpr[6];
+                        e.func=before.gpr[7];
+                        m_events[idx]=e;
+                        tracePrintf("[BIOS NATIVE MIRROR EVENT OPEN] h=%08X cls=%08X spec=%08X mode=%04X func=%08X\n",
+                                    (unsigned)h,(unsigned)e.cls,(unsigned)e.spec,
+                                    (unsigned)e.mode,(unsigned)e.func);
+                    }
+                }
+                break;
+            }
+            case 0x09: {
+                Event* e=eventFromHandle(before.gpr[4]);
+                if(e) *e=Event();
+                break;
+            }
+            case 0x0A:
+            case 0x0B: {
+                Event* e=eventFromHandle(before.gpr[4]);
+                if(e && after.gpr[2]) e->ready=false;
+                break;
+            }
+            case 0x0C: {
+                Event* e=eventFromHandle(before.gpr[4]);
+                if(e) e->enabled=true;
+                break;
+            }
+            case 0x0D: {
+                Event* e=eventFromHandle(before.gpr[4]);
+                if(e) e->enabled=false;
+                break;
+            }
+            case 0x12:
+                m_padBuf1=before.gpr[4]; m_padSize1=before.gpr[5];
+                m_padBuf2=before.gpr[6]; m_padSize2=before.gpr[7];
+                break;
+            case 0x13:
+                m_padEnabled=true;
+                break;
+            case 0x14:
+                m_padEnabled=false;
+                break;
+            case 0x15:
+                m_padButtonDest=before.gpr[5];
+                m_padEnabled=(before.gpr[4]==0x20000000u || before.gpr[4]==0x20000001u);
+                break;
+            case 0x18:
+                m_entryIntHook=0;
+                m_entryIntHookActive=false;
+                break;
+            case 0x19:
+                m_entryIntHook=before.gpr[4];
+                m_entryIntHookActive=false;
+                tracePrintf("[BIOS NATIVE MIRROR ENTRY HOOK] frame=%08X\n",(unsigned)m_entryIntHook);
+                break;
+            case 0x4A:
+                m_cardInitialized=true;
+                m_cardStatus[0]=m_cardStatus[1]=1;
+                m_padEnabled=before.gpr[4]!=0;
+                break;
+            case 0x4B:
+                m_cardStarted=true;
+                break;
+            case 0x4C:
+                m_cardStarted=false;
+                break;
+            case 0x50:
+                m_cardIgnoreChange[0]=m_cardIgnoreChange[1]=true;
+                break;
+            case 0x5B:
+                m_clearPad=before.gpr[4]!=0;
+                break;
+            default:
+                break;
+        }
+    } else if(p==0xC0u){
+        switch(fn){
+            case 0x02: {
+                const uint32_t prio=before.gpr[4];
+                const uint32_t struc=before.gpr[5];
+                if(prio<m_intRpHeads.size() && struc) m_intRpHeads[prio]=struc;
+                break;
+            }
+            case 0x03: {
+                const uint32_t prio=before.gpr[4];
+                const uint32_t struc=before.gpr[5];
+                if(prio<m_intRpHeads.size() && m_intRpHeads[prio]==struc)
+                    m_intRpHeads[prio]=0;
+                break;
+            }
+            case 0x0A: {
+                const uint32_t t=before.gpr[4];
+                if(t<m_autoAck.size()) m_autoAck[t]=before.gpr[5]!=0;
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    tracePrintf("[BIOS NATIVE MIRROR] vector=%08X fn=%02X ret=%08X\n",
+                (unsigned)vector,(unsigned)fn,(unsigned)after.gpr[2]);
+}
+
 void BiosHle::initializeCdrom()
 {
     m_cdBiosIrqInstalled=true;
@@ -1414,7 +1565,7 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
      * Como o BIOS HLE ainda nao executa o callback real registrado
      * pelo jogo, fazemos o incremento aqui temporariamente.
      */
-    if(pending & IrqController::VBlank)
+    if((pending & IrqController::VBlank) && m_entryIntHook==0)
     {
         const uint32_t oldCounter =
             m_mem.read32(0x80072FB0u);
