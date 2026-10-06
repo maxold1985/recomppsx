@@ -58,6 +58,10 @@ void PsxRuntime::loadExecutable(const PsxExeImage& image)
 {
     tracePrintf("[RUNTIME] loadExecutable entry=%08X load=%08X size=%u\n", image.initial_pc, image.load_address, (unsigned)image.payload.size());
     reset();
+
+    // A PS-X EXE normally starts after the retail BIOS has already initialized
+    // the CD-ROM subsystem. Direct EXE loading skips that boot sequence.
+    m_bios.initializeCdrom();
     if (!image.payload.empty())
         m_memory.loadBytes(image.load_address, image.payload.data(), image.payload.size());
 
