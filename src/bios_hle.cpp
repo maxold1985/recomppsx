@@ -21,7 +21,7 @@ void BiosHle::reset()
     m_eventCallbackActive=false; m_eventCallbackFunc=0; m_eventResumeState=r3k::CpuState();
     m_irqChainActive=false; m_irqResumeState=r3k::CpuState();
     m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
-    m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainInSecond=false;
+    m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainPending=0; m_irqChainInSecond=false;
 }
 
 uint32_t BiosHle::arg(const r3k::CpuState& cpu,unsigned index) const
@@ -139,6 +139,7 @@ bool BiosHle::startInterruptChain(r3k::CpuState& c,const r3k::CpuState& resumeSt
     m_irqChainNext=0;
     m_irqChainSecond=0;
     m_irqChainFunc=0;
+    m_irqChainPending=static_cast<uint16_t>(m_irq.stat() & m_irq.mask());
     m_irqChainInSecond=false;
 
     for(uint32_t p=0;p<m_intRpHeads.size();++p){
@@ -210,12 +211,23 @@ bool BiosHle::continueInterruptChain(r3k::CpuState& c)
         next=m_intRpHeads[priority];
     }
 
+    // The real BIOS lets FIRST/SECOND inspect and acknowledge I_STAT.
+    // Only clear sources that were pending on entry and are still asserted
+    // after the complete SysIntRP chain, preventing an HLE re-entry loop.
+    const uint16_t remaining = static_cast<uint16_t>(m_irq.stat() & m_irqChainPending);
+    if(remaining){
+        const uint16_t keep = static_cast<uint16_t>(0x07FFu & ~remaining);
+        tracePrintf("[BIOS IRQ CHAIN FALLBACK ACK] entry=%04X remaining=%04X keep=%04X\n",
+            (unsigned)m_irqChainPending,(unsigned)remaining,(unsigned)keep);
+        m_irq.acknowledge(keep);
+    }
+
     const uint64_t cycles=c.cycles;
     c=m_irqResumeState;
     c.cycles=cycles;
     m_irqChainActive=false;
     m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
-    m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainInSecond=false;
+    m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainPending=0; m_irqChainInSecond=false;
     tracePrintf("[BIOS IRQ CHAIN END] resumePC=%08X cycles=%llu\n",
         (unsigned)c.pc,(unsigned long long)c.cycles);
     return true;
@@ -582,10 +594,15 @@ bool BiosHle::handleExceptionVector(r3k::CpuState& c)
     );
 
     /*
-     * IMPORTANTE:
-     * somente UM acknowledge().
+     * SysIntRP FIRST precisa observar I_STAT ainda pendente. O ACK antecipado
+     * fazia o driver retornar zero antes de SECOND. Quando existe uma cadeia,
+     * o ACK fica a cargo do handler guest; continueInterruptChain() limpa
+     * somente fontes residuais para impedir reentrada infinita.
      */
-    m_irq.acknowledge(keep);
+    const bool haveIntRp = pending && (m_intRpHeads[0] || m_intRpHeads[1] ||
+                                      m_intRpHeads[2] || m_intRpHeads[3]);
+    if(!haveIntRp)
+        m_irq.acknowledge(keep);
 
     /*
      * RFE simplificado.
