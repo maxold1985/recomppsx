@@ -49,7 +49,7 @@ void BiosHle::reset()
     m_irqChainSecond=0; m_irqChainFunc=0; m_irqChainPending=0; m_irqChainInSecond=false;
 }
 
-void BiosHle::observeNativeVectorCall(uint32_t vector,const r3k::CpuState& before,const r3k::CpuState& after)
+void BiosHle::observeNativeVectorCall(uint32_t vector,const r3k::CpuState& before,r3k::CpuState& after)
 {
     const uint32_t p=vector&0x1FFFFFFFu;
     const uint8_t fn=static_cast<uint8_t>(before.gpr[9]&0xFFu);
@@ -141,6 +141,22 @@ void BiosHle::observeNativeVectorCall(uint32_t vector,const r3k::CpuState& befor
             case 0x15:
                 m_padButtonDest=before.gpr[5];
                 m_padEnabled=(before.gpr[4]==0x20000000u || before.gpr[4]==0x20000001u);
+                break;
+            case 0x17:
+                if(m_entryIntHookActive){
+                    const uint64_t cycles=after.cycles;
+                    const uint32_t nativePc=after.pc;
+                    after=m_entryIntResumeState;
+                    after.cycles=cycles;
+                    m_entryIntHookActive=false;
+                    tracePrintf(
+                        "[BIOS NATIVE MIRROR ENTRY HOOK RETURN] nativePC=%08X "
+                        "resumePC=%08X cycles=%llu\n",
+                        (unsigned)nativePc,
+                        (unsigned)after.pc,
+                        (unsigned long long)after.cycles
+                    );
+                }
                 break;
             case 0x18:
                 m_entryIntHook=0;
