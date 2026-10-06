@@ -495,12 +495,30 @@ bool PsxRuntime::initializeOpenBiosCdrom()
 
     bool completed=false;
     unsigned steps=0;
-    const unsigned kMaxCdInitSteps=2000000u;
+    const unsigned kMaxCdInitSteps=4000000u;
+    unsigned vectorTraceCount=0;
 
     for(;steps<kMaxCdInitSteps;++steps){
         if(!m_openBiosCallActive){
             completed=true;
             break;
+        }
+
+        if(isBiosCallVector(m_cpu.pc) && vectorTraceCount<128u){
+            tracePrintf(
+                "[OPENBIOS CD INIT VECTOR] pc=%08X fn=%02X ra=%08X sp=%08X "
+                "a0=%08X a1=%08X a2=%08X a3=%08X cycles=%llu\n",
+                (unsigned)m_cpu.pc,
+                (unsigned)(m_cpu.gpr[9]&0xFFu),
+                (unsigned)m_cpu.gpr[31],
+                (unsigned)m_cpu.gpr[29],
+                (unsigned)m_cpu.gpr[4],
+                (unsigned)m_cpu.gpr[5],
+                (unsigned)m_cpu.gpr[6],
+                (unsigned)m_cpu.gpr[7],
+                (unsigned long long)m_cpu.cycles
+            );
+            ++vectorTraceCount;
         }
 
         const uint64_t cyclesBefore=m_cpu.cycles;
@@ -512,13 +530,12 @@ bool PsxRuntime::initializeOpenBiosCdrom()
         const uint32_t elapsed=
             elapsed64>0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(elapsed64);
 
-        // _96_init waits on asynchronous CD controller responses. Advance the
-        // emulated controller and let pending IRQ2 enter the native BIOS
-        // exception handler while this temporary BIOS call is executing.
-        m_cdrom.tick(elapsed);
-        m_irq.updateCop0(m_cpu);
-        m_irq.takeInterrupt(m_cpu);
-        m_irq.updateCop0(m_cpu);
+        // Native _96_init runs while the whole PS1 hardware keeps moving.
+        // Advancing only CD-ROM starved BIOS waits that depend on root counters,
+        // HBlank/VBlank or another IRQ source. Reuse the normal hardware clock
+        // path so CD delayed replies and BIOS event waits see the same timing as
+        // the direct game execution path.
+        advance(elapsed);
 
         if(!m_openBiosCallActive){
             completed=true;
@@ -544,9 +561,20 @@ bool PsxRuntime::initializeOpenBiosCdrom()
         return true;
     }
 
-    tracePrintf("[OPENBIOS CD INIT FALLBACK] steps=%u pc=%08X completed=%d ret=%08X HINTMSK=%02X I_MASK=%04X\n",
-                steps,(unsigned)stopPc,completed?1:0,(unsigned)ret,
-                (unsigned)hintmsk,(unsigned)imask);
+    tracePrintf(
+        "[OPENBIOS CD INIT FALLBACK] steps=%u pc=%08X completed=%d ret=%08X "
+        "HINTMSK=%02X I_MASK=%04X fn=%02X ra=%08X sp=%08X "
+        "a0=%08X a1=%08X a2=%08X a3=%08X\n",
+        steps,(unsigned)stopPc,completed?1:0,(unsigned)ret,
+        (unsigned)hintmsk,(unsigned)imask,
+        (unsigned)(m_cpu.gpr[9]&0xFFu),
+        (unsigned)m_cpu.gpr[31],
+        (unsigned)m_cpu.gpr[29],
+        (unsigned)m_cpu.gpr[4],
+        (unsigned)m_cpu.gpr[5],
+        (unsigned)m_cpu.gpr[6],
+        (unsigned)m_cpu.gpr[7]
+    );
     return false;
 }
 
