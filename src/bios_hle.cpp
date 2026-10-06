@@ -19,6 +19,7 @@ void BiosHle::reset()
     m_intRpHeads.fill(0);
     m_padBuf1=m_padBuf2=m_padButtonDest=0; m_padSize1=m_padSize2=0; m_padEnabled=false; m_clearPad=true;
     m_cdBiosIrqInstalled=false; m_cdLastStatus=0; m_cdLastError=0;
+    m_cdAsyncReadActive=false; m_cdAsyncReadRemaining=0; m_cdAsyncReadDst=0; m_cdAsyncReadMode=0;
     m_eventCallbackActive=false; m_eventCallbackFunc=0; m_eventResumeState=r3k::CpuState();
     m_irqChainActive=false; m_irqResumeState=r3k::CpuState();
     m_irqChainPriority=0; m_irqChainStruct=0; m_irqChainNext=0;
@@ -36,7 +37,9 @@ void BiosHle::initializeCdrom()
     m_cdrom.write8(0x1F801802u, 0x1Fu); // HINTMSK: INT1..INT5/BF flags
     m_cdrom.write8(0x1F801803u, 0x1Fu); // clear stale HINTSTS low bits
     m_cdrom.write8(0x1F801800u, 0x00u); // bank 0
-    tracePrintf("[BIOS CD INIT] post-boot _96_init HINTMSK=1F\n");
+    m_irq.setMask(static_cast<uint16_t>(m_irq.mask() | IrqController::Cdrom));
+    tracePrintf("[BIOS CD INIT] post-boot _96_init HINTMSK=1F I_MASK=%04X\n",
+                (unsigned)m_irq.mask());
 }
 
 bool BiosHle::serviceCdromInterrupt(uint32_t& callback)
@@ -72,12 +75,43 @@ bool BiosHle::serviceCdromInterrupt(uint32_t& callback)
     // INT3 is the acknowledgement used by commands such as GetStat, and
     // INT2 is the later completion used by multi-phase commands.
     uint32_t eventSpec=0;
-    switch(type){
-        case 2:
-        case 3: eventSpec=0x20u; break;
-        case 4: eventSpec=0x80u; break;
-        case 5: eventSpec=0x8000u; break;
-        default: break; // INT1 is sector-ready and is handled by the data path.
+
+    if(type==1u && m_cdAsyncReadActive && m_cdAsyncReadRemaining!=0){
+        // BIOS asynchronous sector reads transfer decoder data through DMA3.
+        // The current CD core exposes 2048-byte user sectors, hence 512 words.
+        m_mem.write32(0x1F8010B0u,m_cdAsyncReadDst);
+        m_mem.write32(0x1F8010B4u,0x00000200u);
+        m_mem.write32(0x1F8010B8u,0x11000000u);
+
+        m_cdAsyncReadDst += 2048u;
+        --m_cdAsyncReadRemaining;
+
+        tracePrintf("[BIOS CD DMA3] dst=%08X remaining=%u mode=%04X\n",
+                    (unsigned)(m_cdAsyncReadDst-2048u),
+                    (unsigned)m_cdAsyncReadRemaining,
+                    (unsigned)m_cdAsyncReadMode);
+
+        if(m_cdAsyncReadRemaining==0){
+            m_cdAsyncReadActive=false;
+            m_cdrom.stopDataRead();
+
+            const uint32_t dmaDone=deliverEvent(0xF0000003u,0x10u);
+            if(!callback) callback=dmaDone;
+            const uint32_t readDone=deliverEvent(0xF0000003u,0x20u);
+            if(!callback) callback=readDone;
+        }
+    } else {
+        switch(type){
+            case 2: eventSpec=0x20u; break;
+            case 3:
+                // During a BIOS async read, INT3 is only the acknowledgement
+                // of SetMode/ReadN/ReadS; completion is signalled after DMA.
+                if(!m_cdAsyncReadActive) eventSpec=0x20u;
+                break;
+            case 4: eventSpec=0x80u; break;
+            case 5: eventSpec=0x8000u; break;
+            default: break;
+        }
     }
 
     {
@@ -421,10 +455,70 @@ void BiosHle::callA(r3k::CpuState& c,uint8_t fn)
             c.gpr[2]=ok?count:0xFFFFFFFFu; break;
         }
         case 0xA6: c.gpr[2]=m_cdrom.statusByte(); break;
-        case 0x78: c.gpr[2]=1; break; // CdAsyncSeekL accepted; low-level CD controller handles actual seeks.
-        case 0x7C: if(arg(c,0))m_mem.write8(arg(c,0),m_cdrom.statusByte()); c.gpr[2]=1; break;
-        case 0x7E: { // CdAsyncReadSector(count,dst,mode), from current low-level Setloc in full BIOS; use current data path as success.
-            c.gpr[2]=m_cdrom.mounted()?1u:0u; break;
+        case 0x78: { // CdAsyncSeekL(src[3] = BCD MM:SS:FF)
+            const uint32_t src=arg(c,0);
+            if(!m_cdrom.mounted() || !src){ c.gpr[2]=0; break; }
+
+            m_cdrom.write8(0x1F801800u,0x00u);
+            m_cdrom.write8(0x1F801802u,m_mem.read8(src+0u));
+            m_cdrom.write8(0x1F801802u,m_mem.read8(src+1u));
+            m_cdrom.write8(0x1F801802u,m_mem.read8(src+2u));
+            m_cdrom.write8(0x1F801801u,0x02u); // Setloc
+            { uint32_t cb=0; serviceCdromInterrupt(cb); }
+
+            m_cdrom.write8(0x1F801800u,0x00u);
+            m_cdrom.write8(0x1F801801u,0x15u); // SeekL
+            { uint32_t cb=0; serviceCdromInterrupt(cb); }
+
+            c.gpr[2]=1;
+            break;
+        }
+        case 0x7C: { // CdAsyncGetStatus(dst)
+            const uint32_t dst=arg(c,0);
+            if(!m_cdrom.mounted() || !dst){ c.gpr[2]=0; break; }
+
+            m_cdrom.write8(0x1F801800u,0x00u);
+            m_cdrom.write8(0x1F801801u,0x01u); // GetStat
+            { uint32_t cb=0; serviceCdromInterrupt(cb); }
+            m_mem.write8(dst,m_cdLastStatus ? m_cdLastStatus : m_cdrom.statusByte());
+
+            c.gpr[2]=1;
+            break;
+        }
+        case 0x7E: { // CdAsyncReadSector(count,dst,mode)
+            const uint32_t count=arg(c,0);
+            const uint32_t dst=arg(c,1);
+            const uint16_t mode=static_cast<uint16_t>(arg(c,2));
+            if(!m_cdrom.mounted() || count==0 || dst==0){ c.gpr[2]=0; break; }
+
+            m_cdAsyncReadActive=true;
+            m_cdAsyncReadRemaining=count;
+            m_cdAsyncReadDst=dst;
+            m_cdAsyncReadMode=mode;
+
+            m_cdrom.write8(0x1F801800u,0x00u);
+            m_cdrom.write8(0x1F801802u,static_cast<uint8_t>(mode));
+            m_cdrom.write8(0x1F801801u,0x0Eu); // SetMode
+            { uint32_t cb=0; serviceCdromInterrupt(cb); }
+
+            m_cdrom.write8(0x1F801800u,0x00u);
+            m_cdrom.write8(0x1F801801u,(mode & 0x0100u) ? 0x1Bu : 0x06u);
+            { uint32_t cb=0; serviceCdromInterrupt(cb); }
+
+            tracePrintf("[BIOS CD ASYNC READ] count=%u dst=%08X mode=%04X\n",
+                        (unsigned)count,(unsigned)dst,(unsigned)mode);
+            c.gpr[2]=1;
+            break;
+        }
+        case 0x81: { // CdAsyncSetMode(mode)
+            const uint16_t mode=static_cast<uint16_t>(arg(c,0));
+            if(!m_cdrom.mounted()){ c.gpr[2]=0; break; }
+            m_cdrom.write8(0x1F801800u,0x00u);
+            m_cdrom.write8(0x1F801802u,static_cast<uint8_t>(mode));
+            m_cdrom.write8(0x1F801801u,0x0Eu);
+            { uint32_t cb=0; serviceCdromInterrupt(cb); }
+            c.gpr[2]=1;
+            break;
         }
         default: c.gpr[2]=0; break;
     }
