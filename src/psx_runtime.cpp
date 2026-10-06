@@ -432,8 +432,16 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
         return true;
     }
 
-    tracePrintf("[OPENBIOS BOOTSTRAP FALLBACK] stopped steps=%u pc=%08X; using recomppsx HLE vectors\n",
-                steps,(unsigned)bootstrapStopPc);
+    tracePrintf("[OPENBIOS BOOTSTRAP FALLBACK] stopped steps=%u pc=%08X ExCB=%08X/%08X PCB=%08X/%08X TCB=%08X/%08X EvCB=%08X/%08X; using recomppsx HLE vectors\n",
+                steps,(unsigned)bootstrapStopPc,
+                (unsigned)m_memory.rawRead32(0x00000100u),
+                (unsigned)m_memory.rawRead32(0x00000104u),
+                (unsigned)m_memory.rawRead32(0x00000108u),
+                (unsigned)m_memory.rawRead32(0x0000010Cu),
+                (unsigned)m_memory.rawRead32(0x00000110u),
+                (unsigned)m_memory.rawRead32(0x00000114u),
+                (unsigned)m_memory.rawRead32(0x00000120u),
+                (unsigned)m_memory.rawRead32(0x00000124u));
     // Drop every side effect from the incomplete BIOS bootstrap. reset()
     // clears RAM/devices/HLE state but preserves the selected backend and the
     // mapped BIOS ROM, so direct-EXE startup can continue on the old HLE path.
