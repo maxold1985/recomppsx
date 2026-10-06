@@ -322,6 +322,7 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
             break;
     }
 
+    const uint32_t bootstrapStopPc=m_cpu.pc;
     m_openBiosBootstrapActive=false;
     m_openBiosKernelReady=ready;
     m_cpu=savedCpu;
@@ -337,7 +338,7 @@ bool PsxRuntime::bootstrapOpenBiosKernel()
     }
 
     tracePrintf("[OPENBIOS BOOTSTRAP FALLBACK] stopped steps=%u pc=%08X; using recomppsx HLE vectors\n",
-                steps,(unsigned)m_cpu.pc);
+                steps,(unsigned)bootstrapStopPc);
     // Drop partial low-RAM kernel state. The ROM mapping remains loaded because
     // PsxMemory::clear() intentionally does not clear the BIOS image.
     m_memory.clear();
@@ -398,6 +399,13 @@ void PsxRuntime::advance(uint32_t cpuCycles)
 bool PsxRuntime::stepOpenBios()
 {
     if(m_biosBackend!=BiosBackendOpenBios || !m_memory.hasBiosRom())
+        return false;
+
+    const uint32_t physicalPc=m_cpu.pc&0x1FFFFFFFu;
+    // The early bootstrap stops before OpenBIOS installs its exception vector.
+    // If an IRQ lands on 0x80 while an A0/B0/C0 handoff is active, abort that
+    // OpenBIOS call and let the saved recomppsx HLE path retry it safely.
+    if(m_openBiosCallActive && !m_openBiosBootstrapActive && physicalPc==0x00000080u)
         return false;
 
     const bool romPc=isOpenBiosPc(m_cpu.pc);
