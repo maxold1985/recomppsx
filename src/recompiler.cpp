@@ -125,8 +125,9 @@ std::string recompile_psx_exe_to_cpp(const PsxExeImage& e, const RecompileOption
         Decoded d=decode(ins_at(e,pc));
         o << "case "<<hex8(pc)<<"u: {\n";
         o << "++s.cycles;\n";
-        if (pc >= 0x8005C200u && pc <= 0x8005C400u) {
-            o << "psxrecomp::tracePrintf(\"[CD PC] pc=%08X raw=%08X cyc=%llu "
+        if ((pc >= 0x8005C200u && pc <= 0x8005C400u) ||
+            (pc >= 0x80058840u && pc <= 0x800588A0u)) {
+            o << "psxrecomp::tracePrintf(\"" << ((pc >= 0x80058840u && pc <= 0x800588A0u) ? "[CD WAIT PC]" : "[CD PC]") << " pc=%08X raw=%08X cyc=%llu "
                  "v0=%08X v1=%08X a0=%08X a1=%08X a2=%08X a3=%08X "
                  "t0=%08X t1=%08X t2=%08X t3=%08X s0=%08X s1=%08X "
                  "sp=%08X ra=%08X\\n\","
@@ -135,6 +136,15 @@ std::string recompile_psx_exe_to_cpp(const PsxExeImage& e, const RecompileOption
                  "s.gpr[2],s.gpr[3],s.gpr[4],s.gpr[5],s.gpr[6],s.gpr[7],"
                  "s.gpr[8],s.gpr[9],s.gpr[10],s.gpr[11],"
                  "s.gpr[16],s.gpr[17],s.gpr[29],s.gpr[31]);\n";
+            if (pc >= 0x80058840u && pc <= 0x800588A0u) {
+                o << "psxrecomp::tracePrintf(\"[CD WAIT MEM] pc=%08X "
+                     "m734D4=%02X mA00A0=%08X mA00A4=%08X mA00A8=%08X\\n\","
+                     "s.pc,"
+                     "mem.read8(0x800734D4u),"
+                     "mem.read32(0x800A00A0u),"
+                     "mem.read32(0x800A00A4u),"
+                     "mem.read32(0x800A00A8u));\n";
+            }
         }
         if (opt.emit_comments) o << "// "<<hex8(pc)<<": "<<disasm(pc,d)<<"\n";
         if (is_control(d)) {
@@ -149,7 +159,8 @@ std::string recompile_psx_exe_to_cpp(const PsxExeImage& e, const RecompileOption
                 emit_exec(o,pc+4,ds);
             }
             // custom tail using preserved vars
-            if (pc >= 0x8005C200u && pc <= 0x8005C400u) {
+            if ((pc >= 0x8005C200u && pc <= 0x8005C400u) ||
+            (pc >= 0x80058840u && pc <= 0x800588A0u)) {
                 if (d.op==0x04 || d.op==0x05) {
                     o << "psxrecomp::tracePrintf(\"[CD BR] pc=%08X rs=%08X rt=%08X\\n\","
                          << hex8(pc) << "u,_brs,_brt);\n";
