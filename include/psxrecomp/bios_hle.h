@@ -137,6 +137,7 @@ private:
     bool m_cardStarted=false;
     std::array<FileHandle,16> m_files;
     FindState m_find;
+    uint32_t m_pendingEventCallback=0;
 
     // Retail BIOS CD-ROM interrupt service (_96_init / EnqueueCdIntr).
     // It represents the BIOS-owned priority-0 SysIntRP element that direct
