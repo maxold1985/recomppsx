@@ -38,6 +38,7 @@ public:
     // Advances devices by R3000A CPU clocks and services interrupt boundaries.
     void advance(uint32_t cpuCycles);
     bool handleHle();
+    bool stepOpenBios();
 
     r3k::CpuState& cpu() { return m_cpu; }
     PsxMemory& memory() { return m_memory; }
