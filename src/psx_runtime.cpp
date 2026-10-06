@@ -81,6 +81,24 @@ bool PsxRuntime::mountDisc(const std::string& path)
     return ok;
 }
 
+bool PsxRuntime::enableOpenBios(const std::string& path)
+{
+    if(!m_memory.loadBiosRom(path)){
+        tracePrintf("[RUNTIME] OpenBIOS load failed path=%s; keeping HLE backend\n",path.c_str());
+        m_biosBackend=BiosBackendHle;
+        return false;
+    }
+    m_biosBackend=BiosBackendOpenBios;
+    tracePrintf("[RUNTIME] BIOS backend=OpenBIOS ROM mapped at 1FC00000/BFC00000; HLE compatibility retained\n");
+    return true;
+}
+
+void PsxRuntime::useHleBios()
+{
+    m_biosBackend=BiosBackendHle;
+    tracePrintf("[RUNTIME] BIOS backend=existing HLE\n");
+}
+
 void PsxRuntime::advance(uint32_t cpuCycles)
 {
     if(cpuCycles==0)cpuCycles=1;
@@ -134,6 +152,12 @@ void PsxRuntime::advance(uint32_t cpuCycles)
 bool PsxRuntime::handleHle()
 {
     const uint32_t pcBefore = m_cpu.pc;
+    // Compatibility mode is intentionally retained even with OpenBIOS mapped:
+    // generated game code currently cannot execute arbitrary ROM blocks yet.
+    // A0/B0/C0 and exception vectors therefore continue through the proven HLE
+    // path while software can read the real OpenBIOS image from BIOS address space.
+    if(m_biosBackend==BiosBackendOpenBios && !m_memory.hasBiosRom())
+        m_biosBackend=BiosBackendHle;
     if(m_bios.handleVector(m_cpu)){ tracePrintf("[HLE] vector pc=%08X -> %08X cycles=%llu\n", pcBefore, m_cpu.pc, (unsigned long long)m_cpu.cycles); return true; }
     if(m_bios.handleExceptionVector(m_cpu)){ tracePrintf("[HLE] exception pc=%08X -> %08X cycles=%llu\n", pcBefore, m_cpu.pc, (unsigned long long)m_cpu.cycles); return true; }
     return false;
