@@ -18,6 +18,11 @@
 
 namespace psxrecomp {
 
+enum BiosBackend {
+    BiosBackendHle = 0,
+    BiosBackendOpenBios
+};
+
 class PsxRuntime {
 public:
     PsxRuntime();
@@ -25,6 +30,10 @@ public:
     void reset();
     void loadExecutable(const PsxExeImage& image);
     bool mountDisc(const std::string& path);
+    bool enableOpenBios(const std::string& path);
+    void useHleBios();
+    BiosBackend biosBackend() const { return m_biosBackend; }
+    bool openBiosLoaded() const { return m_memory.hasBiosRom(); }
 
     // Advances devices by R3000A CPU clocks and services interrupt boundaries.
     void advance(uint32_t cpuCycles);
@@ -54,6 +63,7 @@ private:
     PsxGte m_gte;
     BiosHle m_bios;
     r3k::CpuState m_cpu;
+    BiosBackend m_biosBackend = BiosBackendHle;
 
     uint64_t m_scanlineCycles = 0;
     uint64_t m_dotClockNumerator = 0;
