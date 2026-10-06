@@ -38,14 +38,28 @@ enum {
     IDC_LOG_DMA,
     IDC_LOG_HLE,
     IDC_LOG_RUNTIME,
-    IDC_LOG_OTHER
+    IDC_LOG_OTHER,
+    IDC_EMU_START,
+    IDC_EMU_PAUSE,
+    IDC_EMU_STOP
 };
+
+enum EmulationRunState {
+    EmulationRunning = 0,
+    EmulationPaused,
+    EmulationStopped
+};
+
+volatile EmulationRunState g_emulationState = EmulationRunning;
 
 struct LogControls {
     HWND button;
+    HWND startButton;
+    HWND pauseButton;
+    HWND stopButton;
     HWND checks[psxrecomp::TraceCategoryCount];
     bool visible;
-    LogControls() : button(0), visible(false) {
+    LogControls() : button(0), startButton(0), pauseButton(0), stopButton(0), visible(false) {
         for (int i=0;i<psxrecomp::TraceCategoryCount;++i) checks[i]=0;
     }
 };
@@ -82,6 +96,19 @@ LRESULT CALLBACK log_panel_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             set_log_panel_visible(!g_logControls.visible);
             return 0;
         }
+        if(id==IDC_EMU_START && HIWORD(wp)==BN_CLICKED){
+            g_emulationState=EmulationRunning;
+            return 0;
+        }
+        if(id==IDC_EMU_PAUSE && HIWORD(wp)==BN_CLICKED){
+            if(g_emulationState==EmulationRunning)
+                g_emulationState=EmulationPaused;
+            return 0;
+        }
+        if(id==IDC_EMU_STOP && HIWORD(wp)==BN_CLICKED){
+            g_emulationState=EmulationStopped;
+            return 0;
+        }
         if(id>=IDC_LOG_CPU && id<=IDC_LOG_OTHER && HIWORD(wp)==BN_CLICKED){
             sync_log_checkboxes();
             return 0;
@@ -107,6 +134,19 @@ void create_log_controls(GLFWwindow* window)
         hwnd,reinterpret_cast<HMENU>(IDC_LOG_BUTTON),
         GetModuleHandleA(0),0);
     SendMessageA(g_logControls.button,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+
+    g_logControls.startButton=CreateWindowA("BUTTON","Start",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,88,8,72,24,
+        hwnd,reinterpret_cast<HMENU>(IDC_EMU_START),GetModuleHandleA(0),0);
+    g_logControls.pauseButton=CreateWindowA("BUTTON","Pause",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,168,8,72,24,
+        hwnd,reinterpret_cast<HMENU>(IDC_EMU_PAUSE),GetModuleHandleA(0),0);
+    g_logControls.stopButton=CreateWindowA("BUTTON","Stop",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,248,8,72,24,
+        hwnd,reinterpret_cast<HMENU>(IDC_EMU_STOP),GetModuleHandleA(0),0);
+    SendMessageA(g_logControls.startButton,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+    SendMessageA(g_logControls.pauseButton,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
+    SendMessageA(g_logControls.stopButton,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
 
     const char* names[psxrecomp::TraceCategoryCount]={
         "CPU","GPU","IRQ","BIOS","CD-ROM","DMA","HLE","Runtime","Other"
@@ -348,6 +388,16 @@ int main(int argc, char** argv)
             const bool down = glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
             const bool left = glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS;
             const bool right = glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
+            if(g_emulationState==EmulationStopped){
+                log_line("[CONTROL] Start after Stop: restarting guest\n");
+                runtime->loadExecutable(image);
+                if(argc>=3) runtime->mountDisc(argv[2]);
+                g_guestPc=runtime->cpu().pc;
+                g_guestCycles=runtime->cpu().cycles;
+                warnedStall=false;
+                g_emulationState=EmulationPaused;
+            }
+
             psxrecomp::PsxPadSio& pad = runtime->pad();
             pad.setButton(psxrecomp::PsxPadSio::Up, up);
             pad.setButton(psxrecomp::PsxPadSio::Down, down);
@@ -362,6 +412,7 @@ int main(int argc, char** argv)
             pad.setButton(psxrecomp::PsxPadSio::Start, glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS);
             pad.setButton(psxrecomp::PsxPadSio::Select, glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
 
+            if(g_emulationState==EmulationRunning) {
             for (int i = 0; i < kBlocksPerHostFrame; ++i) {
                 g_guestPc = runtime->cpu().pc;
                 g_guestCycles = runtime->cpu().cycles;
@@ -392,6 +443,7 @@ int main(int argc, char** argv)
                     }
                     break;
                 }
+            }
             }
 
             if ((g_hostFrame % 300) == 0) {
